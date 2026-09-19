@@ -1,69 +1,120 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { createMemoryRouter, MemoryRouter, RouterProvider, useLocation } from "react-router-dom";
 import { describe, expect, it } from "vitest";
-import Dashboard from "../app/Dashboard";
-import { deriveStats, initialReviews } from "../app/mockData";
+import App from "../src/App";
+import { MockReviewsManagerService } from "../src/services/reviewsManager";
+import type { Review } from "../src/mockData";
 
-describe("dashboard data", () => {
-  it("derives the live overview metrics", () => {
-    expect(deriveStats(initialReviews)).toMatchObject({ total: 7, pending: 3, positive: 4, negative: 3 });
-    expect(deriveStats(initialReviews).average).toBeCloseTo(3.71, 2);
+function RouteProbe() {
+  const location = useLocation();
+  return <output data-testid="route">{location.pathname}{location.search}</output>;
+}
+
+function renderApp(initial = "/overview?location=all", service = new MockReviewsManagerService()) {
+  return render(
+    <MemoryRouter initialEntries={[initial]}>
+      <App service={service} />
+      <RouteProbe />
+    </MemoryRouter>,
+  );
+}
+
+describe("dashboard routing and interactions", () => {
+  it("renders in Hebrew RTL, redirects unknown routes, and exposes route links", async () => {
+    const { container } = renderApp("/missing");
+    expect(await screen.findByText("בוקר טוב, מיכל 👋")).toBeInTheDocument();
+    expect(container.querySelector(".dashboard-shell")).toHaveAttribute("dir", "rtl");
+    expect(screen.getByTestId("route")).toHaveTextContent("/overview?location=all");
+    expect(screen.getAllByRole("link", { name: /ניהול ביקורות/ })[0]).toHaveAttribute("href", "/reviews?location=all");
   });
-});
 
-describe("dashboard interactions", () => {
-  it("renders in Hebrew RTL and filters reviews by location", async () => {
+  it("keeps location context in the URL and filters reviews", async () => {
     const user = userEvent.setup();
-    const { container } = render(<Dashboard />);
-    expect(container.firstChild).toHaveAttribute("dir", "rtl");
+    renderApp();
+    await screen.findByText("בוקר טוב, מיכל 👋");
     await user.selectOptions(screen.getByLabelText("בחירת עסק"), "lock");
-    await user.click(screen.getAllByRole("button", { name: /ניהול ביקורות/ })[0]);
-    expect(screen.getByText("דניאל כהן")).toBeInTheDocument();
+    await user.click(screen.getAllByRole("link", { name: /ניהול ביקורות/ })[0]);
+    expect(screen.getByTestId("route")).toHaveTextContent("/reviews?location=lock");
+    expect(await screen.findByText("דניאל כהן")).toBeInTheDocument();
     expect(screen.getByText("שרון אביטל")).toBeInTheDocument();
     expect(screen.queryByText("נועה לוי")).not.toBeInTheDocument();
   });
 
-  it("approves a pending review and updates its status", async () => {
+  it("stores review filters and search in query parameters", async () => {
     const user = userEvent.setup();
-    render(<Dashboard />);
-    await user.click(screen.getAllByRole("button", { name: /ניהול ביקורות/ })[0]);
-    const review = screen.getByText("דניאל כהן").closest("article")!;
-    await user.click(within(review).getByRole("button", { name: /אישור ושליחה/ }));
-    expect(within(review).getByText("אושר ונשלח")).toBeInTheDocument();
-    expect(within(review).queryByRole("button", { name: /אישור ושליחה/ })).not.toBeInTheDocument();
+    renderApp("/reviews?location=all");
+    await screen.findByRole("heading", { name: "ניהול ביקורות" });
+    await user.click(screen.getByRole("tab", { name: /ממתין לאישור/ }));
+    expect(screen.getByTestId("route")).toHaveTextContent("filter=pending");
+    await user.type(screen.getByPlaceholderText("חיפוש לפי שם או תוכן..."), "יואב");
+    expect(screen.getByTestId("route")).toHaveTextContent("q=%D7%99%D7%95%D7%90%D7%91");
+    expect(screen.getByText("יואב פרץ")).toBeInTheDocument();
+    expect(screen.queryByText("דניאל כהן")).not.toBeInTheDocument();
   });
 
-  it("edits and approves an AI response through the dialog", async () => {
+  it("supports browser-style back navigation between product views", async () => {
+    const service = new MockReviewsManagerService();
+    const router = createMemoryRouter([{
+      path: "*",
+      element: <><App service={service} /><RouteProbe /></>,
+    }], { initialEntries: ["/overview?location=eli"] });
+    render(<RouterProvider router={router} />);
+    await screen.findByText("בוקר טוב, מיכל 👋");
+    await router.navigate("/posts?location=eli");
+    expect(await screen.findByRole("heading", { name: "פוסטים בגוגל" })).toBeInTheDocument();
+    await router.navigate(-1);
+    expect(await screen.findByText("בוקר טוב, מיכל 👋")).toBeInTheDocument();
+    expect(screen.getByTestId("route")).toHaveTextContent("/overview?location=eli");
+  });
+
+  it("approves and edits reviews through the async service", async () => {
     const user = userEvent.setup();
-    render(<Dashboard />);
-    await user.click(screen.getAllByRole("button", { name: /ניהול ביקורות/ })[0]);
-    const review = screen.getByText("יואב פרץ").closest("article")!;
-    await user.click(within(review).getByRole("button", { name: "עריכה" }));
+    renderApp("/reviews?location=all");
+    const customer = await screen.findByText("דניאל כהן");
+    const review = customer.closest("article")!;
+    await user.click(within(review).getByRole("button", { name: /אישור ושליחה/ }));
+    expect(await within(review).findByText("אושר ונשלח")).toBeInTheDocument();
+
+    const secondReview = screen.getByText("יואב פרץ").closest("article")!;
+    await user.click(within(secondReview).getByRole("button", { name: "עריכה" }));
     const dialog = screen.getByRole("dialog", { name: "עריכת תגובה" });
     fireEvent.change(within(dialog).getByLabelText("נוסח התגובה"), { target: { value: "יואב, תודה על המשוב. טיפלנו בנושא התורים ונשמח לארח אותך שוב." } });
     await user.click(within(dialog).getByRole("button", { name: /שמירה, אישור ושליחה/ }));
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(screen.getByText(/טיפלנו בנושא התורים/)).toBeInTheDocument();
   });
 
-  it("creates a Google post and toggles dark mode", async () => {
+  it("creates a post, updates settings, and persists the theme override", async () => {
     const user = userEvent.setup();
-    render(<Dashboard />);
+    renderApp();
+    await screen.findByText("בוקר טוב, מיכל 👋");
     await user.click(screen.getByRole("button", { name: "מעבר למצב כהה" }));
     expect(document.documentElement).toHaveClass("dark");
     expect(localStorage.getItem("agency-theme")).toBe("dark");
-    await user.click(screen.getAllByRole("button", { name: /פוסטים בגוגל/ })[0]);
-    await user.type(screen.getByPlaceholderText("מה חדש בעסק? ספרו ללקוחות שלכם..."), "פוסט חדש שנוצר מתוך בדיקת המערכת");
+
+    await user.click(screen.getAllByRole("link", { name: /פוסטים בגוגל/ })[0]);
+    await user.type(await screen.findByPlaceholderText("מה חדש בעסק? ספרו ללקוחות שלכם..."), "פוסט חדש שנוצר מתוך בדיקת המערכת");
     await user.click(screen.getByRole("button", { name: "פרסום עכשיו" }));
-    expect(screen.getByText("פוסט חדש שנוצר מתוך בדיקת המערכת")).toBeInTheDocument();
+    expect(await screen.findByText("פוסט חדש שנוצר מתוך בדיקת המערכת")).toBeInTheDocument();
+
+    await user.click(screen.getAllByRole("link", { name: /הגדרות/ })[0]);
+    await user.click(await screen.findByRole("button", { name: /מספרת אלי/ }));
+    await user.selectOptions(screen.getByDisplayValue("חם ואישי"), "short");
+    expect(await screen.findByText(/כך נשמעת תגובה בסגנון “קצר וענייני”/)).toBeInTheDocument();
   });
 
-  it("selects a business and updates its response tone", async () => {
+  it("shows Hebrew feedback when a service operation fails", async () => {
+    class FailingService extends MockReviewsManagerService {
+      override async approveReview(): Promise<Review> {
+        throw new Error("network unavailable");
+      }
+    }
     const user = userEvent.setup();
-    render(<Dashboard />);
-    await user.click(screen.getAllByRole("button", { name: /הגדרות/ })[0]);
-    await user.click(screen.getByRole("button", { name: /מספרת אלי/ }));
-    await user.selectOptions(screen.getByDisplayValue("חם ואישי"), "short");
-    expect(screen.getByText(/כך נשמעת תגובה בסגנון “קצר וענייני”/)).toBeInTheDocument();
+    renderApp("/reviews?location=all", new FailingService());
+    const review = (await screen.findByText("דניאל כהן")).closest("article")!;
+    await user.click(within(review).getByRole("button", { name: /אישור ושליחה/ }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("הפעולה לא הושלמה");
+    expect(within(review).getByRole("button", { name: /אישור ושליחה/ })).toBeInTheDocument();
   });
 });
