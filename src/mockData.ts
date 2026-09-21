@@ -1,7 +1,7 @@
 export type Rating = 1 | 2 | 3 | 4 | 5;
-export type ReviewStatus = "pending" | "auto-sent" | "approved";
+export type ReviewStatus = "queued" | "processing" | "pending" | "approving" | "auto-sent" | "approved" | "failed";
 export type PostType = "update" | "offer" | "event";
-export type PostStatus = "published" | "scheduled" | "paused";
+export type PostStatus = "published" | "scheduled" | "publishing" | "paused" | "failed";
 export type Tone = "warm" | "professional" | "short";
 export type Theme = "light" | "dark";
 
@@ -9,7 +9,6 @@ export interface Location {
   id: string;
   name: string;
   category: string;
-  city: string;
   color: string;
 }
 
@@ -20,7 +19,7 @@ export interface Review {
   date: string;
   locationId: string;
   text: string;
-  aiResponse: string;
+  aiResponse: string | null;
   status: ReviewStatus;
   responseMinutes?: number;
 }
@@ -33,7 +32,7 @@ export interface GooglePost {
   imageUrl?: string;
   autoRenew: boolean;
   status: PostStatus;
-  publishedAt: string;
+  publishedAt: string | null;
 }
 
 export interface LocationSettings {
@@ -42,9 +41,9 @@ export interface LocationSettings {
 }
 
 export const locations: Location[] = [
-  { id: "eli", name: "מספרת אלי", category: "מספרה", city: "תל אביב", color: "#725CF2" },
-  { id: "lock", name: "מנעולן אקספרס", category: "מנעולנות", city: "רמת גן", color: "#0E9F8E" },
-  { id: "nona", name: "נונה ביסטרו", category: "מסעדה", city: "גבעתיים", color: "#F08A4B" },
+  { id: "eli", name: "מספרת אלי", category: "מספרה", color: "#725CF2" },
+  { id: "lock", name: "מנעולן אקספרס", category: "מנעולנות", color: "#0E9F8E" },
+  { id: "nona", name: "נונה ביסטרו", category: "מסעדה", color: "#F08A4B" },
 ];
 
 export const initialReviews: Review[] = [
@@ -126,17 +125,20 @@ export const postTypeLabels: Record<PostType, string> = {
 export const postStatusLabels: Record<PostStatus, string> = {
   published: "פורסם",
   scheduled: "מתוזמן",
+  publishing: "בפרסום",
   paused: "מושהה",
+  failed: "הפרסום נכשל",
 };
 
 export function formatHebrewDate(date: string) {
-  return new Intl.DateTimeFormat("he-IL", { day: "numeric", month: "short", year: "numeric" }).format(new Date(`${date}T12:00:00`));
+  const value = /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(`${date}T12:00:00`) : new Date(date);
+  return Number.isNaN(value.getTime()) ? "—" : new Intl.DateTimeFormat("he-IL", { day: "numeric", month: "short", year: "numeric" }).format(value);
 }
 
 export function deriveStats(reviews: Review[]) {
   const total = reviews.length;
   const average = total ? reviews.reduce((sum, review) => sum + review.rating, 0) / total : 0;
-  const answered = reviews.filter((review) => review.status !== "pending").length;
+  const answered = reviews.filter((review) => review.status === "auto-sent" || review.status === "approved").length;
   const responseRate = total ? Math.round((answered / total) * 100) : 0;
   const responseTimes = reviews.flatMap((review) => review.responseMinutes ?? []);
   const averageMinutes = responseTimes.length ? Math.round(responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length) : 0;

@@ -16,6 +16,16 @@ npm install
 npm run dev
 ```
 
+Start the backend first (from `backend/`, normally with `docker compose up --build`), then start the frontend. In local development, leave `VITE_API_BASE_URL` empty: Vite proxies `/api`, `/auth`, and `/health` to `http://localhost:3001`, avoiding browser CORS and hostname differences. Use an absolute URL only when the deployed frontend and API are hosted separately:
+
+```bash
+VITE_API_BASE_URL=https://api.example.com npm run dev
+```
+
+All API requests include credentials. The backend's `FRONTEND_ORIGIN` must exactly match the frontend origin (including scheme and port), and production frontend/API deployments must use a cookie-compatible same-site setup. Local development uses the backend's `AUTH_MODE=dev` together with frontend `VITE_AUTH_MODE=dev`; Google OIDC requires both backend `AUTH_MODE=google` and frontend `VITE_AUTH_MODE=google`.
+
+In development there is no login step: `/api/v1/session` automatically uses the seeded `DEV_USER_EMAIL`. If it returns 401, run the backend seed and verify that `admin@revu.local` exists. The `/auth/google/start` route is intentionally inactive in this mode.
+
 Useful checks:
 
 ```bash
@@ -36,6 +46,6 @@ The selected business is stored in `location`. Review filtering and search use `
 
 ## Backend integration
 
-UI components depend on the typed `ReviewsManagerService` interface in `src/services/reviewsManager.ts`. The current `MockReviewsManagerService` keeps deterministic session-only data. A future HTTP implementation can use `VITE_API_BASE_URL` and replace the injected adapter in `src/main.tsx` without changing page components.
+UI components depend on the typed `ReviewsManagerService` interface in `src/services/reviewsManager.ts`. Runtime uses `HttpReviewsManagerService`; `MockReviewsManagerService` remains available for deterministic tests.
 
 Google OAuth credentials, refresh tokens, and Google Business API calls must be handled by the backend rather than exposed to this browser application.
