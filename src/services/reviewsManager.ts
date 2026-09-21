@@ -118,7 +118,8 @@ export class HttpReviewsManagerService implements ReviewsManagerService {
 
   private async request<T>(path: string, init: RequestInit = {}, retryCsrf = true): Promise<T> {
     const method = (init.method ?? "GET").toUpperCase(); const mutating = !["GET", "HEAD", "OPTIONS"].includes(method);
-    const response = await this.fetcher(`${this.baseUrl}${path}`, { ...init, credentials: "include", headers: { ...(init.body ? { "content-type": "application/json" } : {}), ...(mutating && this.csrfToken ? { "x-csrf-token": this.csrfToken } : {}), ...init.headers } });
+    // Native browser fetch requires the global receiver, not this service instance.
+    const response = await this.fetcher.call(globalThis, `${this.baseUrl}${path}`, { ...init, credentials: "include", headers: { ...(init.body ? { "content-type": "application/json" } : {}), ...(mutating && this.csrfToken ? { "x-csrf-token": this.csrfToken } : {}), ...init.headers } });
     if (!response.ok) {
       const body = await response.json().catch(() => ({})) as ApiErrorBody;
       const error = new ReviewsManagerApiError(response.status, body.error?.code ?? "HTTP_ERROR", body.error?.message ?? "הבקשה נכשלה", body.error?.requestId);

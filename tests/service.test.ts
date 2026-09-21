@@ -29,6 +29,18 @@ describe("MockReviewsManagerService", () => {
 });
 
 describe("HttpReviewsManagerService", () => {
+  it("calls browser fetch with its required global receiver", async () => {
+    const browserFetch = function (this: unknown) {
+      if (this !== globalThis) throw new TypeError("Illegal invocation");
+      return Promise.resolve(new Response(JSON.stringify({
+        user: { id: "u", email: "admin@revu.local", displayName: "מנהל מקומי", role: "ADMIN" },
+        csrfToken: "csrf",
+      }), { status: 200 }));
+    } as typeof fetch;
+    const service = new HttpReviewsManagerService("", browserFetch);
+    await expect(service.getSession()).resolves.toMatchObject({ id: "u" });
+  });
+
   it("maps API data, encodes list queries, and includes credentials", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       reviews: [{ id: "r1", locationId: "eli", locationName: "מספרת אלי", reviewerName: "נועה", rating: 5, text: "מצוין", aiResponse: null, publishedReply: "תודה", status: "AUTO_SENT", date: "2026-09-01T10:00:00.000Z", updatedAt: "2026-09-01T10:00:00.000Z" }],

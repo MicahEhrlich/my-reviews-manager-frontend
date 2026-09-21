@@ -1,167 +1,385 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Navigate, NavLink, Route, Routes, useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import {
-  Bell, Building2, CalendarClock, Check, CheckCircle2, ChevronDown, CircleGauge, Clock3,
-  FileText, ImagePlus, LayoutDashboard, LogOut, Menu, MessageSquareText, Moon,
-  Pencil, Search, Send, Settings, Sparkles, Star, Sun, Trash2, TrendingUp, UploadCloud,
-  WandSparkles, X,
-} from "lucide-react";
-import {
-  deriveStats, formatHebrewDate, navLabels, postStatusLabels, postTypeLabels, toneLabels,
-  type GooglePost, type Location as BusinessLocation, type LocationSettings, type PostType,
-  type Review, type ReviewStatus, type Theme, type Tone,
+import { Sparkles } from "lucide-react";
+import { Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import type { View } from "./app/navigation";
+import { mergeById } from "./app/utils";
+import { StartupFailure } from "./components/auth/StartupFailure";
+import { Unauthenticated } from "./components/auth/Unauthenticated";
+import { DashboardLayout } from "./components/layout/DashboardLayout";
+import { EditReviewModal } from "./components/reviews/EditReviewModal";
+import type {
+  GooglePost,
+  Location as BusinessLocation,
+  LocationSettings,
+  Review,
+  Theme,
 } from "./mockData";
+import { OverviewPage } from "./pages/OverviewPage";
+import { PostsPage } from "./pages/PostsPage";
+import { ReviewsPage } from "./pages/ReviewsPage";
+import { SettingsPage } from "./pages/SettingsPage";
 import {
-  ReviewsManagerApiError, type CreatePostInput, type OverviewStats, type ReviewsManagerService,
+  ReviewsManagerApiError,
+  type CreatePostInput,
+  type OverviewStats,
+  type ReviewsManagerService,
   type SessionUser,
 } from "./services/reviewsManager";
 
-type View = keyof typeof navLabels;
 type ReviewFilter = "all" | "pending" | "positive" | "negative";
+
 const PAGE_SIZE = 25;
-const emptyStats: OverviewStats = { totalReviews: 0, averageRating: 0, responseRate: 0, pendingApprovalCount: 0 };
-const navItems = [
-  { id: "overview" as View, icon: LayoutDashboard }, { id: "reviews" as View, icon: MessageSquareText },
-  { id: "posts" as View, icon: FileText }, { id: "settings" as View, icon: Settings },
-];
+const emptyStats: OverviewStats = {
+  totalReviews: 0,
+  averageRating: 0,
+  responseRate: 0,
+  pendingApprovalCount: 0,
+};
 
-function mergeById<T extends { id: string }>(current: T[], incoming: T[]) {
-  const incomingIds = new Set(incoming.map((item) => item.id));
-  return [...incoming, ...current.filter((item) => !incomingIds.has(item.id))];
+export interface AppProps {
+  service: ReviewsManagerService;
 }
 
-function initials(name: string) { return name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join(""); }
+export default function App({ service }: AppProps) {
+  const routerNavigate = useNavigate();
+  const routerLocation = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedLocation = searchParams.get("location") ?? "all";
+  const rawFilter = searchParams.get("filter");
+  const filter = (["pending", "positive", "negative"].includes(rawFilter ?? "") ? rawFilter : "all") as ReviewFilter;
+  const rawQuery = searchParams.get("q") ?? "";
 
-function Switch({ checked, onChange, label, disabled = false }: { checked: boolean; onChange: (value: boolean) => void; label: string; disabled?: boolean }) {
-  return <button type="button" role="switch" aria-checked={checked} aria-label={label} disabled={disabled} onClick={() => onChange(!checked)} className={`switch ${checked ? "switch-on" : ""}`}><span /></button>;
-}
+  const [user, setUser] = useState<SessionUser | null>(null);
+  const [locations, setLocations] = useState<BusinessLocation[]>([]);
+  const [reviews, setReviews] = useState<Review[]>([]);
+  const [posts, setPosts] = useState<GooglePost[]>([]);
+  const [settings, setSettings] = useState<Record<string, LocationSettings>>({});
+  const [stats, setStats] = useState(emptyStats);
+  const [reviewCursor, setReviewCursor] = useState<string | null>(null);
+  const [postCursor, setPostCursor] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState<"reviews" | "posts" | null>(null);
+  const [unauthenticated, setUnauthenticated] = useState(false);
+  const [startupError, setStartupError] = useState("");
+  const [retryKey, setRetryKey] = useState(0);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState<Set<string>>(() => new Set());
+  const [theme, setTheme] = useState<Theme>(() => document.documentElement.classList.contains("dark") ? "dark" : "light");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [editing, setEditing] = useState<Review | null>(null);
+  const [debouncedQuery, setDebouncedQuery] = useState(rawQuery);
+  const tracked = useRef(new Map<string, number>());
+  const editTriggerRef = useRef<HTMLElement | null>(null);
+  const loadSequence = useRef(0);
 
-function Stars({ rating, size = 16 }: { rating: number; size?: number }) {
-  return <span className="stars" aria-label={`${rating} מתוך 5 כוכבים`} dir="ltr">{[1, 2, 3, 4, 5].map((star) => <Star key={star} size={size} fill={star <= rating ? "currentColor" : "none"} />)}</span>;
-}
+  const selectedLocation = requestedLocation === "all" || locations.some((item) => item.id === requestedLocation)
+    ? requestedLocation
+    : "all";
+  const locationId = selectedLocation === "all" ? undefined : selectedLocation;
+  const serverStatus = filter === "pending" ? "PENDING_APPROVAL" as const : undefined;
 
-function LocationMark({ locationId, locations, compact = false }: { locationId: string; locations: BusinessLocation[]; compact?: boolean }) {
-  const business = locations.find((item) => item.id === locationId);
-  if (!business) return <span className="location-mark"><span className="location-dot">?</span></span>;
-  return <span className={`location-mark ${compact ? "compact" : ""}`}><span className="location-dot" style={{ background: business.color }}>{business.name.charAt(0)}</span>{!compact && <span><strong>{business.name}</strong><small>{business.category}</small></span>}</span>;
-}
+  const showError = useCallback((cause: unknown, fallback = "הפעולה לא הושלמה. נסו שוב בעוד רגע.") => {
+    if (cause instanceof ReviewsManagerApiError && cause.status === 401) {
+      setUnauthenticated(true);
+      return;
+    }
+    setError(cause instanceof ReviewsManagerApiError ? cause.message : fallback);
+  }, []);
 
-function EmptyState({ title, text }: { title: string; text: string }) { return <div className="empty-state"><div className="empty-icon"><Search size={25} /></div><h3>{title}</h3><p>{text}</p></div>; }
-function ThemeToggle({ theme, onToggle }: { theme: Theme; onToggle: () => void }) { const dark = theme === "dark"; return <button className="icon-button theme-toggle" onClick={onToggle} aria-label={dark ? "מעבר למצב בהיר" : "מעבר למצב כהה"}>{dark ? <Sun size={19} /> : <Moon size={19} />}</button>; }
+  useEffect(() => {
+    let active = true;
+    Promise.all([service.getSession(), service.getLocations()])
+      .then(([session, data]) => {
+        if (!active) return;
+        setUser(session);
+        setLocations(data.locations);
+        setSettings(data.settings);
+      })
+      .catch((cause) => {
+        if (!active) return;
+        if (cause instanceof ReviewsManagerApiError && cause.status === 401) {
+          setUnauthenticated(true);
+        } else {
+          setStartupError(cause instanceof ReviewsManagerApiError
+            ? cause.message
+            : "ה־API אינו זמין או שהדפדפן חסם את הבקשה. בדקו את VITE_API_BASE_URL ואת FRONTEND_ORIGIN.");
+        }
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [retryKey, service]);
 
-function Overview({ reviews, stats, locations, selectedLocation, user, onNavigate }: { reviews: Review[]; stats: OverviewStats; locations: BusinessLocation[]; selectedLocation: string; user: SessionUser; onNavigate: (view: View) => void }) {
-  const sample = deriveStats(reviews); const positivePercent = sample.total ? Math.round(sample.positive / sample.total * 100) : 0;
-  const selectedName = selectedLocation === "all" ? "כל הלקוחות" : locations.find((item) => item.id === selectedLocation)?.name;
-  const firstName = user.displayName.split(/\s+/)[0] || user.displayName;
-  const cards = [
-    { label: "סה״כ ביקורות", value: String(stats.totalReviews), note: "כל הביקורות במערכת", icon: MessageSquareText, tone: "violet" },
-    { label: "דירוג ממוצע", value: stats.averageRating.toFixed(1), suffix: "★", note: "ממוצע Google", icon: Star, tone: "amber" },
-    { label: "שיעור מענה", value: `${stats.responseRate}%`, note: "מתוך כלל הביקורות", icon: TrendingUp, tone: "emerald" },
-    { label: "ממתינות לאישור", value: String(stats.pendingApprovalCount), note: "דורשות את תשומת ליבך", icon: CircleGauge, tone: "rose", action: true },
-  ];
-  return <div className="view-stack">
-    <div className="page-heading"><div><p className="eyebrow">תמונת מצב · {selectedName}</p><h1>בוקר טוב, {firstName} 👋</h1><p>הנה מה שקורה עם המוניטין של הלקוחות שלך היום.</p></div><button className="primary-button" onClick={() => onNavigate("reviews")}><MessageSquareText size={18} /> מעבר לביקורות</button></div>
-    <div className="stats-grid">{cards.map(({ label, value, suffix, note, icon: Icon, tone, action }) => <button key={label} className={`stat-card ${action ? "stat-action" : ""}`} onClick={() => action && onNavigate("reviews")} disabled={!action}><span className={`stat-icon ${tone}`}><Icon size={19} /></span><span className="stat-label">{label}</span><strong>{value} {suffix && <em>{suffix}</em>}</strong><small>{note}</small></button>)}</div>
-    <div className="overview-grid">
-      <section className="panel sentiment-panel"><div className="panel-heading"><div><h2>שביעות רצון במדגם</h2><p>חלוקת הביקורות שנטענו כרגע</p></div><span className="period-chip">{reviews.length} אחרונות <ChevronDown size={14} /></span></div><div className="sentiment-content"><div className="donut" style={{ "--positive": `${positivePercent * 3.6}deg` } as React.CSSProperties}><div><strong>{positivePercent}%</strong><span>חיוביות</span></div></div><div className="legend"><div><span className="legend-dot positive" /><p><strong>{sample.positive}</strong> ביקורות חיוביות</p><b>{positivePercent}%</b></div><div><span className="legend-dot negative" /><p><strong>{sample.negative}</strong> ביקורות לשיפור</p><b>{sample.total ? 100 - positivePercent : 0}%</b></div></div></div></section>
-      <section className="panel activity-panel"><div className="panel-heading"><div><h2>פעילות אחרונה</h2><p>הביקורות האחרונות שנטענו</p></div><button className="text-button" onClick={() => onNavigate("reviews")}>לכל הביקורות</button></div><div className="activity-list">{reviews.slice(0, 3).map((review) => <div className="activity-row" key={review.id}><LocationMark locationId={review.locationId} locations={locations} compact /><div><p><strong>{review.customerName}</strong> השאיר/ה ביקורת</p><span><Stars rating={review.rating} size={13} /> · {formatHebrewDate(review.date)}</span></div>{review.status === "pending" ? <span className="status-pill pending">ממתין</span> : <span className="status-pill sent"><Check size={13} /> בטיפול</span>}</div>)}</div></section>
-    </div>
-  </div>;
-}
-
-function EditModal({ review, onClose, onSave }: { review: Review; onClose: () => void; onSave: (text: string, approve: boolean) => void }) {
-  const [text, setText] = useState(review.aiResponse ?? ""); const [error, setError] = useState(""); const closeRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => { closeRef.current?.focus(); const onKey = (event: KeyboardEvent) => event.key === "Escape" && onClose(); document.addEventListener("keydown", onKey); return () => document.removeEventListener("keydown", onKey); }, [onClose]);
-  const submit = (approve: boolean) => { if (!text.trim()) return setError("יש להזין נוסח תגובה לפני השמירה"); onSave(text.trim(), approve); };
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.currentTarget === event.target && onClose()}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="edit-title"><div className="modal-header"><div><span className="ai-kicker"><WandSparkles size={15} /> טיוטה שנוצרה בעזרת AI</span><h2 id="edit-title">עריכת תגובה</h2></div><button ref={closeRef} className="icon-button" onClick={onClose} aria-label="סגירת חלון"><X size={19} /></button></div><div className="review-context"><span className="avatar">{review.customerName.charAt(0)}</span><div><strong>{review.customerName}</strong><Stars rating={review.rating} size={13} /><p>{review.text}</p></div></div><label className="field-label" htmlFor="response-text">נוסח התגובה</label><textarea id="response-text" value={text} onChange={(event) => { setText(event.target.value); setError(""); }} rows={6} /><div className="editor-meta"><span>{text.length} תווים</span></div>{error && <p className="field-error" role="alert">{error}</p>}<div className="modal-actions"><button className="ghost-button" onClick={onClose}>ביטול</button><button className="secondary-button" onClick={() => submit(false)}>שמירת טיוטה</button><button className="primary-button" onClick={() => submit(true)}><Send size={17} /> שמירה, אישור ושליחה</button></div></div></div>;
-}
-
-function reviewStatus(status: ReviewStatus) {
-  const labels: Record<ReviewStatus, string> = { queued: "בתור לעיבוד", processing: "יוצר תגובה", pending: "ממתין לאישור", approving: "נשלח ל-Google", "auto-sent": "נשלח אוטומטית", approved: "אושר ונשלח", failed: "הטיפול נכשל" };
-  return labels[status];
-}
-
-function ReviewsView({ reviews, locations, nextCursor, loadingMore, onLoadMore, onApprove, onEdit, onDelete, busy }: { reviews: Review[]; locations: BusinessLocation[]; nextCursor: string | null; loadingMore: boolean; onLoadMore: () => void; onApprove: (id: string) => void; onEdit: (review: Review) => void; onDelete: (review: Review) => void; busy: Set<string> }) {
-  const [searchParams, setSearchParams] = useSearchParams(); const rawFilter = searchParams.get("filter"); const filter = (["pending", "positive", "negative"].includes(rawFilter ?? "") ? rawFilter : "all") as ReviewFilter; const query = searchParams.get("q") ?? "";
-  const updateSearch = (key: "filter" | "q", value: string) => { const next = new URLSearchParams(searchParams); if (!value || value === "all") next.delete(key); else next.set(key, value); setSearchParams(next); };
-  const counts = { all: reviews.length, pending: reviews.filter((r) => r.status === "pending").length, positive: reviews.filter((r) => r.rating >= 4).length, negative: reviews.filter((r) => r.rating <= 3).length };
-  const filtered = reviews.filter((review) => {
-    const matchesFilter = filter === "all" || (filter === "pending" && review.status === "pending") || (filter === "positive" && review.rating >= 4) || (filter === "negative" && review.rating <= 3);
-    const businessName = locations.find((item) => item.id === review.locationId)?.name ?? "";
-    return matchesFilter && `${review.customerName} ${review.text} ${businessName}`.includes(query.trim());
-  });
-  const tabs: { id: ReviewFilter; label: string }[] = [{ id: "all", label: "הכל" }, { id: "pending", label: "ממתין לאישור" }, { id: "positive", label: "חיובי" }, { id: "negative", label: "שלילי" }];
-  return <div className="view-stack"><div className="page-heading"><div><p className="eyebrow">מרכז המוניטין</p><h1>ניהול ביקורות</h1><p>כל הביקורות והתגובות החכמות במקום אחד.</p></div><div className="heading-badge"><Sparkles size={17} /> {counts.pending} תגובות ממתינות בתוצאות שנטענו</div></div><div className="review-toolbar"><div className="tabs" role="tablist">{tabs.map((tab) => <button key={tab.id} role="tab" aria-selected={filter === tab.id} onClick={() => updateSearch("filter", tab.id)} className={filter === tab.id ? "active" : ""}>{tab.label}<span>{counts[tab.id]}</span></button>)}</div><label className="search-box"><Search size={17} /><span className="sr-only">חיפוש ביקורות</span><input value={query} onChange={(event) => updateSearch("q", event.target.value)} placeholder="חיפוש לפי שם או תוכן..." /></label></div>
-    <div className="review-list">{filtered.length ? filtered.map((review) => { const business = locations.find((item) => item.id === review.locationId); const pending = review.status === "pending"; const stateClass = pending || review.status === "failed" ? "pending" : "sent"; return <article className={`review-card ${pending ? "needs-attention" : ""}`} key={review.id}><div className="review-top"><div className="reviewer"><span className="avatar" style={{ background: `${business?.color ?? "#725CF2"}18`, color: business?.color }}>{review.customerName.charAt(0)}</span><div><strong>{review.customerName}</strong><span><Stars rating={review.rating} /><b>{review.rating}.0</b></span></div></div><div className="review-meta"><span>{formatHebrewDate(review.date)}</span><LocationMark locationId={review.locationId} locations={locations} /></div></div><p className="review-text">“{review.text}”</p><div className="ai-response"><div className="ai-response-title"><span><WandSparkles size={16} /> תגובת AI</span><span className={`status-pill ${stateClass}`}><Clock3 size={13} />{reviewStatus(review.status)}</span></div><p>{review.aiResponse || (review.status === "failed" ? "לא נוצרה תגובה. נסו שוב מאוחר יותר." : "התגובה עדיין נוצרת.")}</p></div>{pending && <div className="review-actions"><button className="primary-button" disabled={busy.has(`review:${review.id}`)} onClick={() => onApprove(review.id)}><Send size={16} /> אישור ושליחה</button><button className="secondary-button" disabled={busy.has(`review:${review.id}`)} onClick={() => onEdit(review)}><Pencil size={15} /> עריכה</button><button className="danger-button" disabled={busy.has(`review:${review.id}`)} onClick={() => onDelete(review)}><Trash2 size={15} /> מחיקה</button></div>}</article>; }) : <EmptyState title="לא נמצאו ביקורות" text="נסו לשנות את הסינון או את מילות החיפוש." />}</div>
-    {nextCursor && <button className="secondary-button load-more" disabled={loadingMore} onClick={onLoadMore}>{loadingMore ? "טוענים..." : "טעינת ביקורות נוספות"}</button>}
-  </div>;
-}
-
-function Posts({ posts, locations, selectedLocation, nextCursor, loadingMore, onLoadMore, onCreate, onToggleStatus }: { posts: GooglePost[]; locations: BusinessLocation[]; selectedLocation: string; nextCursor: string | null; loadingMore: boolean; onLoadMore: () => void; onCreate: (input: CreatePostInput) => Promise<boolean>; onToggleStatus: (post: GooglePost) => Promise<void> }) {
-  const initialLocation = selectedLocation === "all" ? locations[0]?.id ?? "" : selectedLocation;
-  const [form, setForm] = useState({ locationId: initialLocation, type: "update" as PostType, text: "", autoRenew: true }); const [error, setError] = useState(""); const [submitting, setSubmitting] = useState(false);
-  const submit = async (event: React.FormEvent) => { event.preventDefault(); if (form.text.trim().length < 10) return setError("כדאי לכתוב לפחות 10 תווים כדי ליצור פוסט ברור."); setSubmitting(true); const created = await onCreate({ ...form, text: form.text.trim() }); setSubmitting(false); if (created) { setForm((current) => ({ ...current, text: "" })); setError(""); } };
-  return <div className="view-stack"><div className="page-heading"><div><p className="eyebrow">תוכן מקומי</p><h1>פוסטים בגוגל</h1><p>צרו וחדשו תוכן בכל פרופילי העסק.</p></div></div><div className="posts-layout"><form className="panel post-form" onSubmit={submit}><div className="panel-heading"><div><h2>יצירת פוסט חדש</h2><p>הפוסט יישלח לפרסום בפרופיל העסק</p></div><span className="draft-pill">טיוטה חדשה</span></div><div className="form-grid"><label><span className="field-label">בחירת עסק</span><select value={form.locationId} onChange={(event) => setForm({ ...form, locationId: event.target.value })}>{locations.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><label><span className="field-label">סוג הפוסט</span><select value={form.type} onChange={(event) => setForm({ ...form, type: event.target.value as PostType })}>{Object.entries(postTypeLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label></div><label><span className="field-label">תוכן הפוסט</span><textarea rows={6} maxLength={1500} value={form.text} onChange={(event) => { setForm({ ...form, text: event.target.value }); setError(""); }} placeholder="מה חדש בעסק? ספרו ללקוחות שלכם..." /><span className="character-count">{form.text.length}/1,500</span></label>{error && <p className="field-error" role="alert">{error}</p>}<div className="upload-zone disabled" aria-disabled="true"><span><UploadCloud size={24} /></span><strong>הוספת תמונה אינה זמינה כרגע</strong><small>ה-API הקיים עדיין אינו תומך בפרסום מדיה</small></div><div className="renew-box"><div><span className="renew-icon"><CalendarClock size={20} /></span><div><strong>חידוש אוטומטי כל 6 ימים</strong><p>נפרסם מחדש לפני שהפוסט יוסר מגוגל</p></div></div><Switch checked={form.autoRenew} onChange={(value) => setForm({ ...form, autoRenew: value })} label="חידוש אוטומטי" /></div><button className="primary-button submit-post" type="submit" disabled={submitting || !form.locationId}><Send size={17} /> {submitting ? "שולחים..." : "פרסום עכשיו"}</button></form>
-    <section className="panel active-posts"><div className="panel-heading"><div><h2>פוסטים</h2><p>{posts.length} פוסטים נטענו</p></div></div><div className="post-list">{posts.length ? posts.map((post) => { const toggleable = post.status === "published" || post.status === "paused"; return <article className="post-card" key={post.id}><div className={`post-thumb placeholder ${post.type}`}><ImagePlus size={22} /></div><div className="post-main"><div className="post-card-top"><LocationMark locationId={post.locationId} locations={locations} /><span className={`status-pill ${post.status === "paused" || post.status === "failed" ? "pending" : "sent"}`}>{postStatusLabels[post.status]}</span></div><p>{post.text}</p><div className="post-footer"><span>{postTypeLabels[post.type]}{post.publishedAt ? ` · ${formatHebrewDate(post.publishedAt)}` : ""}</span>{post.autoRenew && <span className="renew-label"><CalendarClock size={13} /> מתחדש אוטומטית</span>}</div></div><Switch checked={post.status === "published" || post.status === "publishing" || post.status === "scheduled"} disabled={!toggleable} onChange={() => void onToggleStatus(post)} label={`שינוי סטטוס לפוסט של ${locations.find((item) => item.id === post.locationId)?.name ?? "העסק"}`} /></article>; }) : <EmptyState title="אין פוסטים להצגה" text="צרו את הפוסט הראשון לעסק הזה." />}</div>{nextCursor && <button className="secondary-button load-more" disabled={loadingMore} onClick={onLoadMore}>{loadingMore ? "טוענים..." : "טעינת פוסטים נוספים"}</button>}</section></div></div>;
-}
-
-function SettingsView({ selectedLocation, locations, settings, connectUrl, onSelectLocation, onUpdate }: { selectedLocation: string; locations: BusinessLocation[]; settings: Record<string, LocationSettings>; connectUrl: string; onSelectLocation: (id: string) => void; onUpdate: (locationId: string, patch: Partial<LocationSettings>) => Promise<boolean> }) {
-  const [saved, setSaved] = useState(false); const current = selectedLocation === "all" ? null : settings[selectedLocation]; const update = async (patch: Partial<LocationSettings>) => { if (current && await onUpdate(selectedLocation, patch)) { setSaved(true); window.setTimeout(() => setSaved(false), 1800); } };
-  return <div className="view-stack settings-page"><div className="page-heading"><div><p className="eyebrow">העדפות וחיבורים</p><h1>הגדרות</h1><p>התאימו את אופן הפעולה לכל אחד מהעסקים.</p></div>{saved && <span className="saved-toast"><CheckCircle2 size={16} /> השינויים נשמרו</span>}</div><section className="panel connection-panel"><div className="connection-icon"><Building2 size={22} /></div><div><h2>חשבון Google Business Profile</h2><p>חיבור החשבון והרשאות הניהול מתבצעים באופן מאובטח דרך Google.</p><code>business.manage</code></div><a className="secondary-button" href={connectUrl}>חיבור או ניהול חשבון</a></section><section className="panel business-settings"><div className="panel-heading"><div><h2>הגדרות תגובה לפי עסק</h2><p>לכל עסק אפשר להגדיר קול וכללי אוטומציה שונים</p></div></div>{selectedLocation === "all" ? <div className="location-prompt"><span><Settings size={26} /></span><h3>בחרו עסק כדי להמשיך</h3><p>ההגדרות נשמרות בנפרד לכל מיקום.</p><div>{locations.map((item) => <button key={item.id} onClick={() => onSelectLocation(item.id)}><LocationMark locationId={item.id} locations={locations} /><span aria-hidden>←</span></button>)}</div></div> : current && <div className="settings-content"><div className="selected-business"><LocationMark locationId={selectedLocation} locations={locations} /><button className="text-button" onClick={() => onSelectLocation("all")}>החלפת עסק</button></div><div className="setting-row"><div><span className="setting-icon"><MessageSquareText size={19} /></span><div><strong>טון התגובה של ה־AI</strong><p>הסגנון שישמש ליצירת טיוטות חדשות</p></div></div><select value={current.tone} onChange={(event) => void update({ tone: event.target.value as Tone })}>{Object.entries(toneLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></div><div className="setting-row"><div><span className="setting-icon"><WandSparkles size={19} /></span><div><strong>מענה אוטומטי לביקורות חיוביות</strong><p>תגובות לביקורות של 4–5 כוכבים יישלחו ללא אישור</p></div></div><Switch checked={current.autoReply} onChange={(value) => void update({ autoReply: value })} label="מענה אוטומטי לביקורות חיוביות" /></div><div className="tone-preview"><span><Sparkles size={18} /></span><div><strong>כך נשמעת תגובה בסגנון “{toneLabels[current.tone]}”</strong><p>{current.tone === "warm" ? "תודה רבה על המילים החמות! שמחנו לארח אותך ומחכים כבר לפעם הבאה 💜" : current.tone === "professional" ? "תודה על המשוב החיובי. אנו שמחים שהשירות עמד בציפיותיך." : "תודה על המשוב! שמחנו לעזור ונשמח לראותך שוב."}</p></div></div></div>}</section></div>;
-}
-
-function Unauthenticated({ loginUrl, googleAuth, onRetry }: { loginUrl: string; googleAuth: boolean; onRetry: () => void }) {
-  return <main className="auth-screen" dir="rtl"><span className="brand-mark"><Sparkles size={22} /></span><h1>{googleAuth ? "נדרשת התחברות" : "סשן הפיתוח אינו זמין"}</h1><p>{googleAuth ? "ההתחברות פגה או שהמשתמש אינו מורשה." : "במצב פיתוח אין התחברות עם Google. ודאו שה־backend פעיל, שמסד הנתונים נזרע וש־FRONTEND_ORIGIN תואם לכתובת הדפדפן."}</p>{googleAuth ? <a className="primary-button" href={loginUrl}>התחברות עם Google</a> : <button className="primary-button" onClick={onRetry}>ניסיון חיבור מחדש</button>}</main>;
-}
-
-function StartupFailure({ message, onRetry }: { message: string; onRetry: () => void }) {
-  useEffect(() => { const timer = window.setTimeout(onRetry, 3_000); return () => window.clearTimeout(timer); }, [onRetry]);
-  return <main className="auth-screen" dir="rtl"><span className="brand-mark"><Sparkles size={22} /></span><h1>לא הצלחנו להתחבר לשרת</h1><p>{message}</p><button className="primary-button" onClick={onRetry}>ניסיון נוסף</button></main>;
-}
-
-export default function App({ service }: { service: ReviewsManagerService }) {
-  const routerNavigate = useNavigate(); const routerLocation = useLocation(); const [searchParams, setSearchParams] = useSearchParams();
-  const requestedLocation = searchParams.get("location") ?? "all"; const rawFilter = searchParams.get("filter"); const filter = (["pending", "positive", "negative"].includes(rawFilter ?? "") ? rawFilter : "all") as ReviewFilter; const rawQuery = searchParams.get("q") ?? "";
-  const [user, setUser] = useState<SessionUser | null>(null); const [locations, setLocations] = useState<BusinessLocation[]>([]); const [reviews, setReviews] = useState<Review[]>([]); const [posts, setPosts] = useState<GooglePost[]>([]); const [settings, setSettings] = useState<Record<string, LocationSettings>>({}); const [stats, setStats] = useState(emptyStats);
-  const [reviewCursor, setReviewCursor] = useState<string | null>(null); const [postCursor, setPostCursor] = useState<string | null>(null); const [loading, setLoading] = useState(true); const [loadingMore, setLoadingMore] = useState<"reviews" | "posts" | null>(null); const [unauthenticated, setUnauthenticated] = useState(false); const [startupError, setStartupError] = useState(""); const [retryKey, setRetryKey] = useState(0); const [error, setError] = useState(""); const [busy, setBusy] = useState<Set<string>>(() => new Set()); const [theme, setTheme] = useState<Theme>(() => document.documentElement.classList.contains("dark") ? "dark" : "light"); const [menuOpen, setMenuOpen] = useState(false); const [editing, setEditing] = useState<Review | null>(null); const [debouncedQuery, setDebouncedQuery] = useState(rawQuery); const tracked = useRef(new Map<string, number>()); const editTriggerRef = useRef<HTMLElement | null>(null); const loadSequence = useRef(0);
-  const selectedLocation = requestedLocation === "all" || locations.some((item) => item.id === requestedLocation) ? requestedLocation : "all";
-  const locationId = selectedLocation === "all" ? undefined : selectedLocation; const serverStatus = filter === "pending" ? "PENDING_APPROVAL" as const : undefined;
-
-  const showError = useCallback((cause: unknown, fallback = "הפעולה לא הושלמה. נסו שוב בעוד רגע.") => { if (cause instanceof ReviewsManagerApiError && cause.status === 401) { setUnauthenticated(true); return; } setError(cause instanceof ReviewsManagerApiError ? cause.message : fallback); }, []);
-  useEffect(() => { let active = true; Promise.all([service.getSession(), service.getLocations()]).then(([session, data]) => { if (!active) return; setUser(session); setLocations(data.locations); setSettings(data.settings); }).catch((cause) => { if (!active) return; if (cause instanceof ReviewsManagerApiError && cause.status === 401) setUnauthenticated(true); else setStartupError(cause instanceof ReviewsManagerApiError ? cause.message : "ה־API אינו זמין או שהדפדפן חסם את הבקשה. בדקו את VITE_API_BASE_URL ואת FRONTEND_ORIGIN."); }).finally(() => { if (active) setLoading(false); }); return () => { active = false; }; }, [retryKey, service]);
-  useEffect(() => { const timer = window.setTimeout(() => setDebouncedQuery(rawQuery.trim()), 300); return () => window.clearTimeout(timer); }, [rawQuery]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedQuery(rawQuery.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [rawQuery]);
 
   const refresh = useCallback(async (quiet = false) => {
-    if (!user) return; const sequence = ++loadSequence.current; if (!quiet) setLoading(true);
+    if (!user) return;
+    const sequence = ++loadSequence.current;
+    if (!quiet) setLoading(true);
     try {
-      const [overview, reviewPage, postPage] = await Promise.all([service.getOverviewStats(locationId), service.getReviews({ locationId, q: debouncedQuery || undefined, status: serverStatus, limit: PAGE_SIZE }), service.getPosts({ locationId, limit: PAGE_SIZE })]);
-      if (sequence !== loadSequence.current) return; setStats(overview); setReviews((current) => quiet ? mergeById(current, reviewPage.items) : reviewPage.items); if (!quiet) setReviewCursor(reviewPage.nextCursor); setPosts((current) => quiet ? mergeById(current, postPage.items) : postPage.items); if (!quiet) setPostCursor(postPage.nextCursor); setError("");
-    } catch (cause) { if (sequence === loadSequence.current) showError(cause, "לא הצלחנו לטעון את נתוני המערכת. נסו לרענן את הדף."); }
-    finally { if (!quiet && sequence === loadSequence.current) setLoading(false); }
+      const [overview, reviewPage, postPage] = await Promise.all([
+        service.getOverviewStats(locationId),
+        service.getReviews({ locationId, q: debouncedQuery || undefined, status: serverStatus, limit: PAGE_SIZE }),
+        service.getPosts({ locationId, limit: PAGE_SIZE }),
+      ]);
+      if (sequence !== loadSequence.current) return;
+      setStats(overview);
+      setReviews((current) => quiet ? mergeById(current, reviewPage.items) : reviewPage.items);
+      if (!quiet) setReviewCursor(reviewPage.nextCursor);
+      setPosts((current) => quiet ? mergeById(current, postPage.items) : postPage.items);
+      if (!quiet) setPostCursor(postPage.nextCursor);
+      setError("");
+    } catch (cause) {
+      if (sequence === loadSequence.current) {
+        showError(cause, "לא הצלחנו לטעון את נתוני המערכת. נסו לרענן את הדף.");
+      }
+    } finally {
+      if (!quiet && sequence === loadSequence.current) setLoading(false);
+    }
   }, [debouncedQuery, locationId, serverStatus, service, showError, user]);
-  useEffect(() => { if (!user) return; const timer = window.setTimeout(() => void refresh(), 0); return () => window.clearTimeout(timer); }, [refresh, user]);
-  useEffect(() => { if (!user) return; const onFocus = () => void refresh(true); const timer = window.setInterval(() => { if (!document.hidden) void refresh(true); }, 30_000); window.addEventListener("focus", onFocus); return () => { window.clearInterval(timer); window.removeEventListener("focus", onFocus); }; }, [refresh, user]);
-  useEffect(() => { if (!user) return; const timer = window.setInterval(async () => { if (tracked.current.size === 0) return; try { const [reviewPage, postPage] = await Promise.all([service.getReviews({ locationId, q: debouncedQuery || undefined, limit: 100 }), service.getPosts({ locationId, limit: 100 })]); setReviews((current) => mergeById(current, reviewPage.items)); setPosts((current) => mergeById(current, postPage.items)); const transient = new Set<string>(); reviewPage.items.filter((item) => item.status === "approving" || item.status === "processing" || item.status === "queued").forEach((item) => transient.add(`review:${item.id}`)); postPage.items.filter((item) => item.status === "publishing" || item.status === "scheduled").forEach((item) => transient.add(`post:${item.id}`)); const now = Date.now(); tracked.current.forEach((startedAt, id) => { if (!transient.has(id) || now - startedAt > 60_000) tracked.current.delete(id); }); } catch { /* regular refresh reports persistent failures */ } }, 2_000); return () => window.clearInterval(timer); }, [debouncedQuery, locationId, service, user]);
-  useEffect(() => { window.scrollTo({ top: 0, behavior: "smooth" }); }, [routerLocation.pathname]);
 
-  const execute = async <T,>(key: string, action: () => Promise<T>): Promise<T | undefined> => { setBusy((current) => new Set(current).add(key)); setError(""); try { return await action(); } catch (cause) { showError(cause); return undefined; } finally { setBusy((current) => { const next = new Set(current); next.delete(key); return next; }); } };
-  const loadMoreReviews = async () => { if (!reviewCursor) return; setLoadingMore("reviews"); try { const page = await service.getReviews({ locationId, q: debouncedQuery || undefined, status: serverStatus, cursor: reviewCursor, limit: PAGE_SIZE }); setReviews((current) => mergeById(current, page.items)); setReviewCursor(page.nextCursor); } catch (cause) { showError(cause); } finally { setLoadingMore(null); } };
-  const loadMorePosts = async () => { if (!postCursor) return; setLoadingMore("posts"); try { const page = await service.getPosts({ locationId, cursor: postCursor, limit: PAGE_SIZE }); setPosts((current) => mergeById(current, page.items)); setPostCursor(page.nextCursor); } catch (cause) { showError(cause); } finally { setLoadingMore(null); } };
-  const approve = async (id: string) => { const result = await execute(`review:${id}`, () => service.approveReview(id)); if (result) { setReviews((current) => current.map((item) => item.id === id ? { ...item, status: result.status } : item)); tracked.current.set(`review:${id}`, Date.now()); await refresh(true); } };
-  const deleteReview = async (review: Review) => { if (!window.confirm(`למחוק את הביקורת של ${review.customerName}?`)) return; const removed = await execute(`review:${review.id}`, async () => { await service.deleteReview(review.id); return true; }); if (removed) { setReviews((current) => current.filter((item) => item.id !== review.id)); void service.getOverviewStats(locationId).then(setStats); } };
-  const saveEdit = async (text: string, shouldApprove: boolean) => { if (!editing) return; const id = editing.id; const updated = await execute(`review:${id}`, () => service.saveReview(id, { response: text, approve: shouldApprove })); if (updated) { setReviews((current) => current.map((item) => item.id === id ? updated : item)); if (updated.status === "approving") tracked.current.set(`review:${id}`, Date.now()); setEditing(null); requestAnimationFrame(() => editTriggerRef.current?.focus()); } else { await refresh(true); } };
-  const createPost = async (input: CreatePostInput) => { const post = await execute("create-post", () => service.createPost(input)); if (!post) return false; setPosts((current) => [post, ...current]); if (post.status === "scheduled" || post.status === "publishing") tracked.current.set(`post:${post.id}`, Date.now()); void service.getOverviewStats(locationId).then(setStats); return true; };
-  const togglePostStatus = async (post: GooglePost) => { const updated = await execute(`post:${post.id}`, () => service.changePostStatus(post.id, post.status === "paused" ? "published" : "paused")); if (updated) setPosts((current) => current.map((item) => item.id === updated.id ? updated : item)); };
-  const updateSettings = async (id: string, patch: Partial<LocationSettings>) => { const updated = await execute(`settings:${id}`, () => service.updateLocationSettings(id, patch)); if (!updated) return false; setSettings((current) => ({ ...current, [id]: updated })); return true; };
-  const selectLocation = (id: string) => { const next = new URLSearchParams(searchParams); next.set("location", locations.some((item) => item.id === id) ? id : "all"); setSearchParams(next); };
-  const routeFor = (next: View) => `/${next}?location=${selectedLocation}`; const navigate = (next: View) => routerNavigate(routeFor(next));
-  const logout = async () => { const done = await execute("logout", async () => { await service.logout(); return true; }); if (done) { setUser(null); setUnauthenticated(true); } };
-  const toggleTheme = () => { const next = theme === "dark" ? "light" : "dark"; document.documentElement.classList.toggle("dark", next === "dark"); localStorage.setItem("agency-theme", next); setTheme(next); };
+  useEffect(() => {
+    if (!user) return;
+    const timer = window.setTimeout(() => void refresh(), 0);
+    return () => window.clearTimeout(timer);
+  }, [refresh, user]);
 
-  const retryConnection = () => { setUser(null); setLoading(true); setStartupError(""); setUnauthenticated(false); setRetryKey((value) => value + 1); };
-  if (unauthenticated) return <Unauthenticated loginUrl={service.getLoginUrl()} googleAuth={service.getAuthMode() === "google"} onRetry={retryConnection} />;
-  if (loading && !user) return <div className="app-loading" dir="rtl" role="status"><span className="brand-mark"><Sparkles size={22} /></span><strong>טוענים את Revu...</strong></div>;
+  useEffect(() => {
+    if (!user) return;
+    const onFocus = () => void refresh(true);
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void refresh(true);
+    }, 30_000);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [refresh, user]);
+
+  useEffect(() => {
+    if (!user) return;
+    const timer = window.setInterval(async () => {
+      if (tracked.current.size === 0) return;
+      try {
+        const [reviewPage, postPage] = await Promise.all([
+          service.getReviews({ locationId, q: debouncedQuery || undefined, limit: 100 }),
+          service.getPosts({ locationId, limit: 100 }),
+        ]);
+        setReviews((current) => mergeById(current, reviewPage.items));
+        setPosts((current) => mergeById(current, postPage.items));
+        const transient = new Set<string>();
+        reviewPage.items
+          .filter((item) => item.status === "approving" || item.status === "processing" || item.status === "queued")
+          .forEach((item) => transient.add(`review:${item.id}`));
+        postPage.items
+          .filter((item) => item.status === "publishing" || item.status === "scheduled")
+          .forEach((item) => transient.add(`post:${item.id}`));
+        const now = Date.now();
+        tracked.current.forEach((startedAt, id) => {
+          if (!transient.has(id) || now - startedAt > 60_000) tracked.current.delete(id);
+        });
+      } catch {
+        // Regular refreshes report persistent failures.
+      }
+    }, 2_000);
+    return () => window.clearInterval(timer);
+  }, [debouncedQuery, locationId, service, user]);
+
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, [routerLocation.pathname]);
+
+  const execute = async <T,>(key: string, action: () => Promise<T>): Promise<T | undefined> => {
+    setBusy((current) => new Set(current).add(key));
+    setError("");
+    try {
+      return await action();
+    } catch (cause) {
+      showError(cause);
+      return undefined;
+    } finally {
+      setBusy((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+    }
+  };
+
+  const loadMoreReviews = async () => {
+    if (!reviewCursor) return;
+    setLoadingMore("reviews");
+    try {
+      const page = await service.getReviews({
+        locationId,
+        q: debouncedQuery || undefined,
+        status: serverStatus,
+        cursor: reviewCursor,
+        limit: PAGE_SIZE,
+      });
+      setReviews((current) => mergeById(current, page.items));
+      setReviewCursor(page.nextCursor);
+    } catch (cause) {
+      showError(cause);
+    } finally {
+      setLoadingMore(null);
+    }
+  };
+
+  const loadMorePosts = async () => {
+    if (!postCursor) return;
+    setLoadingMore("posts");
+    try {
+      const page = await service.getPosts({ locationId, cursor: postCursor, limit: PAGE_SIZE });
+      setPosts((current) => mergeById(current, page.items));
+      setPostCursor(page.nextCursor);
+    } catch (cause) {
+      showError(cause);
+    } finally {
+      setLoadingMore(null);
+    }
+  };
+
+  const approve = async (id: string) => {
+    const result = await execute(`review:${id}`, () => service.approveReview(id));
+    if (result) {
+      setReviews((current) => current.map((item) => item.id === id ? { ...item, status: result.status } : item));
+      tracked.current.set(`review:${id}`, Date.now());
+      await refresh(true);
+    }
+  };
+
+  const deleteReview = async (review: Review) => {
+    if (!window.confirm(`למחוק את הביקורת של ${review.customerName}?`)) return;
+    const removed = await execute(`review:${review.id}`, async () => {
+      await service.deleteReview(review.id);
+      return true;
+    });
+    if (removed) {
+      setReviews((current) => current.filter((item) => item.id !== review.id));
+      void service.getOverviewStats(locationId).then(setStats);
+    }
+  };
+
+  const saveEdit = async (text: string, shouldApprove: boolean) => {
+    if (!editing) return;
+    const id = editing.id;
+    const updated = await execute(`review:${id}`, () => service.saveReview(id, { response: text, approve: shouldApprove }));
+    if (updated) {
+      setReviews((current) => current.map((item) => item.id === id ? updated : item));
+      if (updated.status === "approving") tracked.current.set(`review:${id}`, Date.now());
+      setEditing(null);
+      requestAnimationFrame(() => editTriggerRef.current?.focus());
+    } else {
+      await refresh(true);
+    }
+  };
+
+  const createPost = async (input: CreatePostInput) => {
+    const post = await execute("create-post", () => service.createPost(input));
+    if (!post) return false;
+    setPosts((current) => [post, ...current]);
+    if (post.status === "scheduled" || post.status === "publishing") {
+      tracked.current.set(`post:${post.id}`, Date.now());
+    }
+    void service.getOverviewStats(locationId).then(setStats);
+    return true;
+  };
+
+  const togglePostStatus = async (post: GooglePost) => {
+    const updated = await execute(`post:${post.id}`, () => service.changePostStatus(
+      post.id,
+      post.status === "paused" ? "published" : "paused",
+    ));
+    if (updated) {
+      setPosts((current) => current.map((item) => item.id === updated.id ? updated : item));
+    }
+  };
+
+  const updateSettings = async (id: string, patch: Partial<LocationSettings>) => {
+    const updated = await execute(`settings:${id}`, () => service.updateLocationSettings(id, patch));
+    if (!updated) return false;
+    setSettings((current) => ({ ...current, [id]: updated }));
+    return true;
+  };
+
+  const selectLocation = (id: string) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("location", locations.some((item) => item.id === id) ? id : "all");
+    setSearchParams(next);
+  };
+  const routeFor = (next: View) => `/${next}?location=${selectedLocation}`;
+  const navigate = (next: View) => routerNavigate(routeFor(next));
+  const logout = async () => {
+    const done = await execute("logout", async () => {
+      await service.logout();
+      return true;
+    });
+    if (done) {
+      setUser(null);
+      setUnauthenticated(true);
+    }
+  };
+  const toggleTheme = () => {
+    const next = theme === "dark" ? "light" : "dark";
+    document.documentElement.classList.toggle("dark", next === "dark");
+    localStorage.setItem("agency-theme", next);
+    setTheme(next);
+  };
+  const retryConnection = () => {
+    setUser(null);
+    setLoading(true);
+    setStartupError("");
+    setUnauthenticated(false);
+    setRetryKey((value) => value + 1);
+  };
+
+  if (unauthenticated) {
+    return <Unauthenticated loginUrl={service.getLoginUrl()} googleAuth={service.getAuthMode() === "google"} onRetry={retryConnection} />;
+  }
+  if (loading && !user) {
+    return <div className="app-loading" dir="rtl" role="status"><span className="brand-mark"><Sparkles size={22} /></span><strong>טוענים את Revu...</strong></div>;
+  }
   if (startupError) return <StartupFailure message={startupError} onRetry={retryConnection} />;
-  if (!user) return <Unauthenticated loginUrl={service.getLoginUrl()} googleAuth={service.getAuthMode() === "google"} onRetry={retryConnection} />;
-  return <div className="dashboard-shell" dir="rtl"><aside className={`sidebar ${menuOpen ? "open" : ""}`} aria-label="ניווט ראשי"><div className="brand"><span className="brand-mark"><Sparkles size={21} /></span><span><strong>Revu</strong><small>ניהול מוניטין חכם</small></span><button className="mobile-close" onClick={() => setMenuOpen(false)} aria-label="סגירת תפריט"><X /></button></div><nav>{navItems.map(({ id, icon: Icon }) => <NavLink key={id} to={routeFor(id)} onClick={() => setMenuOpen(false)}><Icon size={19} /><span>{navLabels[id]}</span>{id === "reviews" && stats.pendingApprovalCount > 0 && <b>{stats.pendingApprovalCount}</b>}</NavLink>)}</nav><div className="sidebar-card"><span><Sparkles size={18} /></span><strong>העוזר החכם עובד בשבילך</strong><p>הנתונים מתעדכנים ישירות מהמערכת.</p></div><div className="sidebar-profile"><span>{initials(user.displayName)}</span><div><strong>{user.displayName}</strong><small>{user.role === "ADMIN" ? "מנהלת הסוכנות" : "חברת צוות"}</small></div><button className="icon-button" onClick={() => void logout()} disabled={busy.has("logout")} aria-label="התנתקות"><LogOut size={17} /></button></div></aside>{menuOpen && <button className="sidebar-scrim" onClick={() => setMenuOpen(false)} aria-label="סגירת תפריט" />}<div className="main-area"><header className="topbar"><div className="mobile-brand"><button className="icon-button" onClick={() => setMenuOpen(true)} aria-label="פתיחת תפריט"><Menu size={21} /></button><span className="brand-mark"><Sparkles size={18} /></span></div><label className="account-select"><span>תצוגת חשבון</span><div><Building2 size={17} /><select aria-label="בחירת עסק" value={selectedLocation} onChange={(event) => selectLocation(event.target.value)}><option value="all">כל הלקוחות</option>{locations.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select><ChevronDown size={15} /></div></label><div className="topbar-actions"><span className="sync-status"><span /> מחובר למערכת</span><ThemeToggle theme={theme} onToggle={toggleTheme} /><button className="icon-button notification" aria-label="התראות"><Bell size={19} /></button><div className="mini-avatar">{initials(user.displayName)}</div></div></header><main><div className="content-wrap">{error && <div className="error-banner" role="alert">{error}<button onClick={() => setError("")} aria-label="סגירת הודעה"><X size={16} /></button></div>}{loading ? <div className="app-loading" role="status">טוענים נתונים...</div> : <Routes><Route path="/" element={<Navigate to={routeFor("overview")} replace />} /><Route path="/overview" element={<Overview reviews={reviews} stats={stats} locations={locations} selectedLocation={selectedLocation} user={user} onNavigate={navigate} />} /><Route path="/reviews" element={<ReviewsView reviews={reviews} locations={locations} nextCursor={reviewCursor} loadingMore={loadingMore === "reviews"} onLoadMore={() => void loadMoreReviews()} onApprove={(id) => void approve(id)} onEdit={(review) => { editTriggerRef.current = document.activeElement as HTMLElement; setEditing(review); }} onDelete={(review) => void deleteReview(review)} busy={busy} />} /><Route path="/posts" element={<Posts key={selectedLocation} posts={posts} locations={locations} selectedLocation={selectedLocation} nextCursor={postCursor} loadingMore={loadingMore === "posts"} onLoadMore={() => void loadMorePosts()} onCreate={createPost} onToggleStatus={togglePostStatus} />} /><Route path="/settings" element={<SettingsView selectedLocation={selectedLocation} locations={locations} settings={settings} connectUrl={service.getGoogleBusinessConnectUrl()} onSelectLocation={selectLocation} onUpdate={updateSettings} />} /><Route path="*" element={<Navigate to={routeFor("overview")} replace />} /></Routes>}</div></main><nav className="mobile-nav" aria-label="ניווט נייד">{navItems.map(({ id, icon: Icon }) => <NavLink key={id} to={routeFor(id)}><Icon size={20} /><span>{navLabels[id].split(" ")[0]}</span></NavLink>)}</nav></div>{editing && <EditModal review={editing} onClose={() => setEditing(null)} onSave={saveEdit} />}</div>;
+  if (!user) {
+    return <Unauthenticated loginUrl={service.getLoginUrl()} googleAuth={service.getAuthMode() === "google"} onRetry={retryConnection} />;
+  }
+
+  return <>
+    <DashboardLayout
+      user={user}
+      locations={locations}
+      selectedLocation={selectedLocation}
+      pendingApprovalCount={stats.pendingApprovalCount}
+      theme={theme}
+      menuOpen={menuOpen}
+      error={error}
+      loading={loading}
+      logoutBusy={busy.has("logout")}
+      routeFor={routeFor}
+      onMenuOpen={() => setMenuOpen(true)}
+      onMenuClose={() => setMenuOpen(false)}
+      onSelectLocation={selectLocation}
+      onToggleTheme={toggleTheme}
+      onLogout={() => void logout()}
+      onDismissError={() => setError("")}
+    >
+      <Routes>
+        <Route path="/" element={<Navigate to={routeFor("overview")} replace />} />
+        <Route path="/overview" element={<OverviewPage reviews={reviews} stats={stats} locations={locations} selectedLocation={selectedLocation} user={user} onNavigate={navigate} />} />
+        <Route path="/reviews" element={<ReviewsPage reviews={reviews} locations={locations} nextCursor={reviewCursor} loadingMore={loadingMore === "reviews"} onLoadMore={() => void loadMoreReviews()} onApprove={(id) => void approve(id)} onEdit={(review) => { editTriggerRef.current = document.activeElement as HTMLElement; setEditing(review); }} onDelete={(review) => void deleteReview(review)} busy={busy} />} />
+        <Route path="/posts" element={<PostsPage key={selectedLocation} posts={posts} locations={locations} selectedLocation={selectedLocation} nextCursor={postCursor} loadingMore={loadingMore === "posts"} onLoadMore={() => void loadMorePosts()} onCreate={createPost} onToggleStatus={togglePostStatus} />} />
+        <Route path="/settings" element={<SettingsPage selectedLocation={selectedLocation} locations={locations} settings={settings} connectUrl={service.getGoogleBusinessConnectUrl()} onSelectLocation={selectLocation} onUpdate={updateSettings} />} />
+        <Route path="*" element={<Navigate to={routeFor("overview")} replace />} />
+      </Routes>
+    </DashboardLayout>
+    {editing && <EditReviewModal review={editing} onClose={() => setEditing(null)} onSave={saveEdit} />}
+  </>;
 }

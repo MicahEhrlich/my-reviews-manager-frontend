@@ -85,6 +85,17 @@ describe("dashboard routing and interactions", () => {
     expect(screen.getByText(/טיפלנו בנושא התורים/)).toBeInTheDocument();
   });
 
+  it("renders a persisted AI draft and approval controls for a low review", async () => {
+    renderApp("/reviews?location=all");
+    const customer = await screen.findByText("דניאל כהן");
+    const review = customer.closest("article")!;
+    expect(within(review).getByText(/מצטערים לשמוע על העיכוב/)).toBeInTheDocument();
+    expect(within(review).getByText("ממתין לאישור")).toBeInTheDocument();
+    expect(within(review).getByRole("button", { name: /אישור ושליחה/ })).toBeInTheDocument();
+    expect(within(review).getByRole("button", { name: "עריכה" })).toBeInTheDocument();
+    expect(within(review).getByRole("button", { name: "מחיקה" })).toBeInTheDocument();
+  });
+
   it("creates a post, updates settings, and persists the theme override", async () => {
     const user = userEvent.setup();
     renderApp();
