@@ -179,7 +179,7 @@ export default function App({ service }: AppProps) {
           .filter((item) => item.status === "approving" || item.status === "processing" || item.status === "queued")
           .forEach((item) => transient.add(`review:${item.id}`));
         postPage.items
-          .filter((item) => item.status === "publishing" || item.status === "scheduled")
+          .filter((item) => item.status === "generating" || item.status === "publishing" || item.status === "scheduled")
           .forEach((item) => transient.add(`post:${item.id}`));
         const now = Date.now();
         tracked.current.forEach((startedAt, id) => {
@@ -303,6 +303,14 @@ export default function App({ service }: AppProps) {
     }
   };
 
+  const retryPost = async (post: GooglePost) => {
+    const updated = await execute(`post:${post.id}`, () => service.retryPost(post.id));
+    if (updated) {
+      setPosts((current) => current.map((item) => item.id === updated.id ? updated : item));
+      tracked.current.set(`post:${post.id}`, Date.now());
+    }
+  };
+
   const updateSettings = async (id: string, patch: Partial<LocationSettings>) => {
     const updated = await execute(`settings:${id}`, () => service.updateLocationSettings(id, patch));
     if (!updated) return false;
@@ -375,7 +383,7 @@ export default function App({ service }: AppProps) {
         <Route path="/" element={<Navigate to={routeFor("overview")} replace />} />
         <Route path="/overview" element={<OverviewPage reviews={reviews} stats={stats} locations={locations} selectedLocation={selectedLocation} user={user} onNavigate={navigate} />} />
         <Route path="/reviews" element={<ReviewsPage reviews={reviews} locations={locations} nextCursor={reviewCursor} loadingMore={loadingMore === "reviews"} onLoadMore={() => void loadMoreReviews()} onApprove={(id) => void approve(id)} onEdit={(review) => { editTriggerRef.current = document.activeElement as HTMLElement; setEditing(review); }} onDelete={(review) => void deleteReview(review)} busy={busy} />} />
-        <Route path="/posts" element={<PostsPage key={selectedLocation} posts={posts} locations={locations} selectedLocation={selectedLocation} nextCursor={postCursor} loadingMore={loadingMore === "posts"} onLoadMore={() => void loadMorePosts()} onCreate={createPost} onToggleStatus={togglePostStatus} />} />
+        <Route path="/posts" element={<PostsPage key={selectedLocation} posts={posts} locations={locations} selectedLocation={selectedLocation} nextCursor={postCursor} loadingMore={loadingMore === "posts"} onLoadMore={() => void loadMorePosts()} onCreate={createPost} onToggleStatus={togglePostStatus} onRetry={retryPost} />} />
         <Route path="/settings" element={<SettingsPage selectedLocation={selectedLocation} locations={locations} settings={settings} connectUrl={service.getGoogleBusinessConnectUrl()} onSelectLocation={selectLocation} onUpdate={updateSettings} />} />
         <Route path="*" element={<Navigate to={routeFor("overview")} replace />} />
       </Routes>

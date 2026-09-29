@@ -14,7 +14,7 @@ describe("MockReviewsManagerService", () => {
     const service = new MockReviewsManagerService();
     expect((await service.approveReview("r2")).status).toBe("approved");
     expect((await service.saveReview("r4", { response: "תגובה חדשה", approve: false })).aiResponse).toBe("תגובה חדשה");
-    const post = await service.createPost({ locationId: "eli", type: "update", text: "פוסט בדיקה חדש", autoRenew: true });
+    const post = await service.createPost({ locationId: "eli", brief: "פוסט בדיקה חדש", autoRenew: true, frequencyDays: 7 });
     expect((await service.changePostStatus(post.id, "paused")).status).toBe("paused");
     expect((await service.updateLocationSettings("eli", { tone: "short" })).tone).toBe("short");
     await service.deleteReview("r7");
@@ -51,6 +51,16 @@ describe("HttpReviewsManagerService", () => {
     expect(page.items[0]).toMatchObject({ customerName: "נועה", aiResponse: "תודה", status: "auto-sent" });
     expect(page.nextCursor).toBe("r1");
     expect(fetcher).toHaveBeenCalledWith("http://api.test/api/v1/reviews?locationId=eli&q=%D7%A0%D7%95%D7%A2%D7%94+%D7%9C%D7%95%D7%99&limit=25", expect.objectContaining({ credentials: "include" }));
+  });
+
+  it("sends text-only AI post creation as JSON", async () => {
+    const apiPost = { id: "p1", locationId: "eli", locationName: "מספרת אלי", type: "STANDARD", text: null, imageUrl: null, brief: "תורים חדשים", structuredPayload: null, recurring: true, frequencyDays: 7, nextPublishAt: "2026-09-29T10:00:00.000Z", lastPublishedAt: null, status: "SCHEDULED", generationStatus: "QUEUED", failureMessage: null };
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ post: apiPost }), { status: 202, headers: { "content-type": "application/json" } }));
+    const service = new HttpReviewsManagerService("http://api.test", fetcher);
+    await service.createPost({ locationId: "eli", brief: "תורים חדשים", autoRenew: true, frequencyDays: 7 });
+    const init = fetcher.mock.calls[0]?.[1];
+    expect(JSON.parse(String(init?.body))).toMatchObject({ locationId: "eli", brief: "תורים חדשים", isRecurring: true, frequencyDays: 7 });
+    expect(init?.headers).toHaveProperty("content-type", "application/json");
   });
 
   it("refreshes and retries a mutation once when the CSRF token is stale", async () => {

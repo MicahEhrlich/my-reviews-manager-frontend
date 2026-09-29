@@ -1,7 +1,7 @@
 export type Rating = 1 | 2 | 3 | 4 | 5;
 export type ReviewStatus = "queued" | "processing" | "pending" | "approving" | "auto-sent" | "approved" | "failed";
 export type PostType = "update" | "offer" | "event";
-export type PostStatus = "published" | "scheduled" | "publishing" | "paused" | "failed";
+export type PostStatus = "published" | "scheduled" | "generating" | "publishing" | "paused" | "failed";
 export type Tone = "warm" | "professional" | "short";
 export type Theme = "light" | "dark";
 
@@ -28,9 +28,13 @@ export interface GooglePost {
   id: string;
   locationId: string;
   type: PostType;
-  text: string;
+  text: string | null;
   imageUrl?: string;
+  brief?: string;
   autoRenew: boolean;
+  frequencyDays?: 3 | 5 | 7 | 14;
+  nextPublishAt?: string | null;
+  failureMessage?: string | null;
   status: PostStatus;
   publishedAt: string | null;
 }
@@ -125,6 +129,7 @@ export const postTypeLabels: Record<PostType, string> = {
 export const postStatusLabels: Record<PostStatus, string> = {
   published: "פורסם",
   scheduled: "מתוזמן",
+  generating: "ה-AI כותב",
   publishing: "בפרסום",
   paused: "מושהה",
   failed: "הפרסום נכשל",

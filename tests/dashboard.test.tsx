@@ -105,9 +105,10 @@ describe("dashboard routing and interactions", () => {
     expect(localStorage.getItem("agency-theme")).toBe("dark");
 
     await user.click(screen.getAllByRole("link", { name: /פוסטים בגוגל/ })[0]);
-    await user.type(await screen.findByPlaceholderText("מה חדש בעסק? ספרו ללקוחות שלכם..."), "פוסט חדש שנוצר מתוך בדיקת המערכת");
-    await user.click(screen.getByRole("button", { name: "פרסום עכשיו" }));
-    expect(await screen.findByText("פוסט חדש שנוצר מתוך בדיקת המערכת")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/העלאת תמונה/)).not.toBeInTheDocument();
+    await user.type(await screen.findByPlaceholderText(/ספרו על התפריט החדש/), "פוסט חדש שנוצר מתוך בדיקת המערכת");
+    await user.click(screen.getByRole("button", { name: /יצירה ופרסום/ }));
+    expect(await screen.findByText("חדש אצלנו: פוסט חדש שנוצר מתוך בדיקת המערכת")).toBeInTheDocument();
 
     await user.click(screen.getAllByRole("link", { name: /הגדרות/ })[0]);
     await user.click(await screen.findByRole("button", { name: /מספרת אלי/ }));

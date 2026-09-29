@@ -10,7 +10,7 @@ export interface OverviewStats { totalReviews: number; averageRating: number; re
 export interface ReviewQuery { locationId?: string; cursor?: string; limit?: number; status?: "PENDING_APPROVAL"; q?: string; }
 export interface PostQuery { locationId?: string; cursor?: string; limit?: number; }
 export interface SaveReviewInput { response: string; approve: boolean; }
-export interface CreatePostInput { locationId: string; type: PostType; text: string; autoRenew: boolean; }
+export interface CreatePostInput { locationId: string; brief: string; publishAt?: string; autoRenew: boolean; frequencyDays: 3 | 5 | 7 | 14; }
 export interface ApprovalAcknowledgement { id: string; status: "approving"; }
 
 export interface ReviewsManagerService {
@@ -24,6 +24,7 @@ export interface ReviewsManagerService {
   deleteReview(id: string): Promise<void>;
   createPost(input: CreatePostInput): Promise<GooglePost>;
   changePostStatus(id: string, status: PostStatus): Promise<GooglePost>;
+  retryPost(id: string): Promise<GooglePost>;
   updateLocationSettings(locationId: string, patch: Partial<LocationSettings>): Promise<LocationSettings>;
   logout(): Promise<void>;
   getLoginUrl(): string;
@@ -34,14 +35,13 @@ export interface ReviewsManagerService {
 interface ApiErrorBody { error?: { code?: string; message?: string; requestId?: string }; }
 interface ApiLocation { id: string; name: string; googleLocationId: string; category: string; tone: "WARM_PERSONAL" | "PROFESSIONAL" | "SHORT_DIRECT"; autoReplyEnabled: boolean; whatsappAlertNumber: string | null; }
 interface ApiReview { id: string; locationId: string; locationName: string; reviewerName: string; rating: number; text: string; aiResponse: string | null; publishedReply: string | null; status: "QUEUED" | "PROCESSING" | "PENDING_APPROVAL" | "APPROVING" | "AUTO_SENT" | "APPROVED" | "FAILED" | "DELETED"; date: string; updatedAt: string; }
-interface ApiPost { id: string; locationId: string; locationName: string; type: "STANDARD" | "OFFER" | "EVENT"; text: string; structuredPayload: unknown; recurring: boolean; frequencyDays: number; nextPublishAt: string | null; lastPublishedAt: string | null; status: "SCHEDULED" | "PUBLISHING" | "ACTIVE" | "PAUSED" | "FAILED"; }
+interface ApiPost { id: string; locationId: string; locationName: string; type: "STANDARD" | "OFFER" | "EVENT"; text: string | null; imageUrl: string | null; brief: string | null; structuredPayload: unknown; recurring: boolean; frequencyDays: number; nextPublishAt: string | null; lastPublishedAt: string | null; status: "SCHEDULED" | "PUBLISHING" | "ACTIVE" | "PAUSED" | "FAILED"; generationStatus: "QUEUED" | "GENERATING" | "PUBLISHING" | "PUBLISHED" | "FAILED" | null; failureMessage: string | null; }
 
 const colors = ["#725CF2", "#0E9F8E", "#F08A4B", "#3B82F6", "#D65B8F", "#8B6F47"];
 const toneFromApi: Record<ApiLocation["tone"], Tone> = { WARM_PERSONAL: "warm", PROFESSIONAL: "professional", SHORT_DIRECT: "short" };
 const toneToApi: Record<Tone, ApiLocation["tone"]> = { warm: "WARM_PERSONAL", professional: "PROFESSIONAL", short: "SHORT_DIRECT" };
 const reviewStatusFromApi: Record<ApiReview["status"], ReviewStatus> = { QUEUED: "queued", PROCESSING: "processing", PENDING_APPROVAL: "pending", APPROVING: "approving", AUTO_SENT: "auto-sent", APPROVED: "approved", FAILED: "failed", DELETED: "failed" };
 const postTypeFromApi: Record<ApiPost["type"], PostType> = { STANDARD: "update", OFFER: "offer", EVENT: "event" };
-const postTypeToApi: Record<PostType, ApiPost["type"]> = { update: "STANDARD", offer: "OFFER", event: "EVENT" };
 const postStatusFromApi: Record<ApiPost["status"], PostStatus> = { SCHEDULED: "scheduled", PUBLISHING: "publishing", ACTIVE: "published", PAUSED: "paused", FAILED: "failed" };
 
 export class ReviewsManagerApiError extends Error {
@@ -53,7 +53,8 @@ function toReview(value: ApiReview): Review {
   return { id: value.id, locationId: value.locationId, customerName: value.reviewerName, rating: Math.min(5, Math.max(1, value.rating)) as Review["rating"], date: value.date, text: value.text, aiResponse: value.aiResponse ?? value.publishedReply, status: reviewStatusFromApi[value.status] };
 }
 function toPost(value: ApiPost): GooglePost {
-  return { id: value.id, locationId: value.locationId, type: postTypeFromApi[value.type], text: value.text, autoRenew: value.recurring, status: postStatusFromApi[value.status], publishedAt: value.lastPublishedAt ?? value.nextPublishAt };
+  const occurrenceStatus = value.generationStatus === "GENERATING" ? "generating" : value.generationStatus === "PUBLISHING" ? "publishing" : value.generationStatus === "FAILED" ? "failed" : value.generationStatus === "QUEUED" ? "scheduled" : undefined;
+  return { id: value.id, locationId: value.locationId, type: postTypeFromApi[value.type], text: value.text, imageUrl: value.imageUrl ?? undefined, brief: value.brief ?? undefined, autoRenew: value.recurring, frequencyDays: [3, 5, 7, 14].includes(value.frequencyDays) ? value.frequencyDays as 3 | 5 | 7 | 14 : undefined, nextPublishAt: value.nextPublishAt, status: value.status === "PAUSED" ? "paused" : occurrenceStatus ?? postStatusFromApi[value.status], publishedAt: value.lastPublishedAt, failureMessage: value.failureMessage };
 }
 function queryString(values: Record<string, string | number | undefined>): string {
   const query = new URLSearchParams();
@@ -101,7 +102,7 @@ export class HttpReviewsManagerService implements ReviewsManagerService {
   }
   deleteReview(id: string) { return this.request<void>(`/api/v1/reviews/${encodeURIComponent(id)}`, { method: "DELETE" }); }
   async createPost(input: CreatePostInput): Promise<GooglePost> {
-    const result = await this.request<{ post: ApiPost }>("/api/v1/posts", { method: "POST", body: JSON.stringify({ locationId: input.locationId, topicType: postTypeToApi[input.type], text: input.text, isRecurring: input.autoRenew }) });
+    const result = await this.request<{ post: ApiPost }>("/api/v1/posts", { method: "POST", body: JSON.stringify({ locationId: input.locationId, brief: input.brief, publishAt: input.publishAt, isRecurring: input.autoRenew, frequencyDays: input.frequencyDays }) });
     return toPost(result.post);
   }
   async changePostStatus(id: string, status: PostStatus): Promise<GooglePost> {
@@ -109,6 +110,7 @@ export class HttpReviewsManagerService implements ReviewsManagerService {
     const result = await this.request<{ post: ApiPost }>(`/api/v1/posts/${encodeURIComponent(id)}/status`, { method: "PATCH", body: JSON.stringify({ status: status === "published" ? "ACTIVE" : "PAUSED" }) });
     return toPost(result.post);
   }
+  async retryPost(id: string): Promise<GooglePost> { const result = await this.request<{ post: ApiPost }>(`/api/v1/posts/${encodeURIComponent(id)}/retry`, { method: "POST" }); return toPost(result.post); }
   async updateLocationSettings(locationId: string, patch: Partial<LocationSettings>): Promise<LocationSettings> {
     const body = { ...(patch.tone ? { defaultTone: toneToApi[patch.tone] } : {}), ...(patch.autoReply === undefined ? {} : { autoReplyEnabled: patch.autoReply }) };
     const result = await this.request<{ location: ApiLocation }>(`/api/v1/locations/${encodeURIComponent(locationId)}/settings`, { method: "PATCH", body: JSON.stringify(body) });
@@ -119,7 +121,7 @@ export class HttpReviewsManagerService implements ReviewsManagerService {
   private async request<T>(path: string, init: RequestInit = {}, retryCsrf = true): Promise<T> {
     const method = (init.method ?? "GET").toUpperCase(); const mutating = !["GET", "HEAD", "OPTIONS"].includes(method);
     // Native browser fetch requires the global receiver, not this service instance.
-    const response = await this.fetcher.call(globalThis, `${this.baseUrl}${path}`, { ...init, credentials: "include", headers: { ...(init.body ? { "content-type": "application/json" } : {}), ...(mutating && this.csrfToken ? { "x-csrf-token": this.csrfToken } : {}), ...init.headers } });
+    const response = await this.fetcher.call(globalThis, `${this.baseUrl}${path}`, { ...init, credentials: "include", headers: { ...(init.body && !(init.body instanceof FormData) ? { "content-type": "application/json" } : {}), ...(mutating && this.csrfToken ? { "x-csrf-token": this.csrfToken } : {}), ...init.headers } });
     if (!response.ok) {
       const body = await response.json().catch(() => ({})) as ApiErrorBody;
       const error = new ReviewsManagerApiError(response.status, body.error?.code ?? "HTTP_ERROR", body.error?.message ?? "הבקשה נכשלה", body.error?.requestId);
@@ -154,8 +156,9 @@ export class MockReviewsManagerService implements ReviewsManagerService {
   async approveReview(id: string): Promise<Review> { const review = this.reviews.find((item) => item.id === id); if (!review) throw notFound("הביקורת", id); review.status = "approved"; return clone(review); }
   async saveReview(id: string, input: SaveReviewInput): Promise<Review> { const review = this.reviews.find((item) => item.id === id); if (!review) throw notFound("הביקורת", id); review.aiResponse = input.response; if (input.approve) review.status = "approved"; return clone(review); }
   async deleteReview(id: string): Promise<void> { if (!this.reviews.some((item) => item.id === id)) throw notFound("הביקורת", id); this.reviews = this.reviews.filter((item) => item.id !== id); }
-  async createPost(input: CreatePostInput): Promise<GooglePost> { const post: GooglePost = { ...input, id: `p-${Date.now()}`, status: "published", publishedAt: new Date().toISOString() }; this.posts.unshift(post); return clone(post); }
+  async createPost(input: CreatePostInput): Promise<GooglePost> { const post: GooglePost = { id: `p-${Date.now()}`, locationId: input.locationId, type: "update", text: `חדש אצלנו: ${input.brief}`, brief: input.brief, autoRenew: input.autoRenew, frequencyDays: input.frequencyDays, nextPublishAt: input.publishAt ?? new Date().toISOString(), status: "scheduled", publishedAt: null }; this.posts.unshift(post); return clone(post); }
   async changePostStatus(id: string, status: PostStatus): Promise<GooglePost> { const post = this.posts.find((item) => item.id === id); if (!post) throw notFound("הפוסט", id); post.status = status; return clone(post); }
+  async retryPost(id: string): Promise<GooglePost> { const post = this.posts.find((item) => item.id === id); if (!post) throw notFound("הפוסט", id); post.status = "scheduled"; post.failureMessage = null; return clone(post); }
   async updateLocationSettings(locationId: string, patch: Partial<LocationSettings>): Promise<LocationSettings> { const current = this.settings[locationId]; if (!current) throw notFound("העסק", locationId); this.settings[locationId] = { ...current, ...patch }; return clone(this.settings[locationId]); }
   async logout() {}
   getLoginUrl() { return "/auth/google/start"; }
