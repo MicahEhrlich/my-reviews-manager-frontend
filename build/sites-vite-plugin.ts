@@ -14,7 +14,7 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-// Packages Sites metadata and migrations after Vite finishes compiling.
+// Packages the Sites metadata and static-app Worker after Vite finishes compiling.
 export function sites(): Plugin {
   let root = process.cwd();
 
@@ -27,6 +27,8 @@ export function sites(): Plugin {
     async closeBundle() {
       const outputDirectory = resolve(root, "dist", ".openai");
       const hostingConfig = resolve(root, ".openai", "hosting.json");
+      const workerSource = resolve(root, "worker", "index.js");
+      const workerOutput = resolve(root, "dist", "server", "index.js");
 
       await rm(outputDirectory, { recursive: true, force: true });
       await mkdir(outputDirectory, { recursive: true });
@@ -34,6 +36,9 @@ export function sites(): Plugin {
       if (await exists(hostingConfig)) {
         await cp(hostingConfig, resolve(outputDirectory, "hosting.json"));
       }
+
+      await mkdir(resolve(root, "dist", "server"), { recursive: true });
+      await cp(workerSource, workerOutput);
     },
   };
 }

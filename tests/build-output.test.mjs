@@ -12,6 +12,8 @@ test("Vite emits a deployable Hebrew RTL SPA", async () => {
   assert.match(html, /\/assets\/[^"']+\.js/);
   assert.doesNotMatch(html, /vinext|__next|react-server-dom/);
   await access(new URL("../dist/.openai/hosting.json", import.meta.url));
+  const worker = await readFile(new URL("../dist/server/index.js", import.meta.url), "utf8");
+  assert.match(worker, /env\.ASSETS\.fetch/);
   const assets = await readdir(new URL("../dist/assets/", import.meta.url));
   assert.ok(assets.some((file) => file.endsWith(".css")));
   assert.ok(assets.some((file) => file.endsWith(".js")));
