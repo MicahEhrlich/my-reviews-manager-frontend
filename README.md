@@ -41,6 +41,7 @@ npm run build
 - `/#/reviews`
 - `/#/posts`
 - `/#/settings`
+- `/#/onboarding` (resumable Google Business connection wizard)
 
 The selected business is stored in `location`. Review filtering and search use `filter` and `q` query parameters.
 
@@ -48,4 +49,4 @@ The selected business is stored in `location`. Review filtering and search use `
 
 UI components depend on the typed `ReviewsManagerService` interface in `src/services/reviewsManager.ts`. Runtime uses `HttpReviewsManagerService`; `MockReviewsManagerService` remains available for deterministic tests.
 
-Google OAuth credentials, refresh tokens, and Google Business API calls must be handled by the backend rather than exposed to this browser application.
+Google OAuth credentials, refresh tokens, and Google Business API calls are handled by the backend rather than exposed to this browser application. The session response includes workspace capabilities; the UI hides unavailable reply and publishing actions, while the backend remains the authoritative enforcement layer.

@@ -5,7 +5,13 @@ import {
 } from "../mockData";
 
 export interface Page<T> { items: T[]; nextCursor: string | null; }
-export interface SessionUser { id: string; email: string; displayName: string; role: "ADMIN" | "MEMBER"; }
+export type Capability = "READ_REVIEWS" | "REPLY_TO_REVIEWS" | "PUBLISH_POSTS" | "AUTO_REPLY";
+export interface SessionUser { id: string; email: string; displayName: string; role: "ADMIN" | "MEMBER"; capabilities: Capability[]; connection: { status: string; googleEmail: string } | null; }
+export type OnboardingStep = "WELCOME" | "CONNECT" | "SELECT_LOCATIONS" | "SYNCING" | "SYNC_FAILED" | "COMPLETE";
+export interface OnboardingState { step: OnboardingStep; readOnly: boolean; capabilities: Capability[]; connection: { id: string; email: string; status: string; lastError: string | null } | null; selectedLocationCount: number; syncedLocationCount: number; lastSyncAt: number | null; }
+export interface GoogleLocationCandidate { id: string; resourceName: string; name: string; category: string; verified: boolean; selected: boolean; }
+export interface GoogleAccountCandidate { id: string; name: string; resourceName: string; locations: GoogleLocationCandidate[]; }
+export interface GoogleConnectionCandidates { id: string; email: string; status: string; accounts: GoogleAccountCandidate[]; }
 export interface OverviewStats { totalReviews: number; averageRating: number; responseRate: number; pendingApprovalCount: number; }
 export interface ReviewQuery { locationId?: string; cursor?: string; limit?: number; status?: "PENDING_APPROVAL"; q?: string; }
 export interface PostQuery { locationId?: string; cursor?: string; limit?: number; }
@@ -15,6 +21,11 @@ export interface ApprovalAcknowledgement { id: string; status: "approving"; }
 
 export interface ReviewsManagerService {
   getSession(): Promise<SessionUser>;
+  getOnboarding(): Promise<OnboardingState>;
+  getGoogleCandidates(): Promise<{ connections: GoogleConnectionCandidates[] }>;
+  selectGoogleLocations(resourceNames: string[]): Promise<OnboardingState>;
+  syncGoogleReviews(): Promise<OnboardingState>;
+  disconnectGoogle(): Promise<void>;
   getLocations(): Promise<{ locations: Location[]; settings: Record<string, LocationSettings> }>;
   getOverviewStats(locationId?: string): Promise<OverviewStats>;
   getReviews(query?: ReviewQuery): Promise<Page<Review>>;
@@ -73,9 +84,14 @@ export class HttpReviewsManagerService implements ReviewsManagerService {
   getAuthMode() { return this.authMode; }
 
   async getSession(): Promise<SessionUser> {
-    const result = await this.request<{ user: SessionUser; csrfToken: string }>("/api/v1/session", {}, false);
-    this.csrfToken = result.csrfToken; return result.user;
+    const result = await this.request<{ user: Omit<SessionUser, "capabilities" | "connection">; csrfToken: string; capabilities?: Capability[]; connection?: SessionUser["connection"] }>("/api/v1/session", {}, false);
+    this.csrfToken = result.csrfToken; return { ...result.user, capabilities: result.capabilities ?? ["READ_REVIEWS"], connection: result.connection ?? null };
   }
+  getOnboarding() { return this.request<OnboardingState>("/api/v1/onboarding"); }
+  getGoogleCandidates() { return this.request<{ connections: GoogleConnectionCandidates[] }>("/api/v1/google-business/candidates"); }
+  selectGoogleLocations(resourceNames: string[]) { return this.request<OnboardingState>("/api/v1/google-business/locations/select", { method: "POST", body: JSON.stringify({ resourceNames }) }); }
+  syncGoogleReviews() { return this.request<OnboardingState>("/api/v1/google-business/sync", { method: "POST" }); }
+  disconnectGoogle() { return this.request<void>("/api/v1/google-business/disconnect", { method: "POST" }); }
   async getLocations() {
     const result = await this.request<{ locations: ApiLocation[] }>("/api/v1/locations");
     const settings: Record<string, LocationSettings> = {};
@@ -138,7 +154,12 @@ function notFound(entity: string, id: string): Error { return new Error(`${entit
 
 export class MockReviewsManagerService implements ReviewsManagerService {
   private reviews = clone(initialReviews); private posts = clone(initialPosts); private settings = clone(initialSettings);
-  async getSession(): Promise<SessionUser> { return { id: "mock-user", email: "admin@revu.local", displayName: "מיכל כהן", role: "ADMIN" }; }
+  async getSession(): Promise<SessionUser> { return { id: "mock-user", email: "admin@revu.local", displayName: "מיכל כהן", role: "ADMIN", capabilities: ["READ_REVIEWS", "REPLY_TO_REVIEWS", "PUBLISH_POSTS", "AUTO_REPLY"], connection: { status: "CONNECTED", googleEmail: "demo@revu.local" } }; }
+  async getOnboarding(): Promise<OnboardingState> { return { step: "COMPLETE", readOnly: false, capabilities: ["READ_REVIEWS", "REPLY_TO_REVIEWS", "PUBLISH_POSTS", "AUTO_REPLY"], connection: { id: "demo", email: "demo@revu.local", status: "CONNECTED", lastError: null }, selectedLocationCount: mockLocations.length, syncedLocationCount: mockLocations.length, lastSyncAt: Date.now() }; }
+  async getGoogleCandidates() { return { connections: [] as GoogleConnectionCandidates[] }; }
+  async selectGoogleLocations(resourceNames: string[]) { void resourceNames; return this.getOnboarding(); }
+  async syncGoogleReviews() { return this.getOnboarding(); }
+  async disconnectGoogle() {}
   async getLocations() { return clone({ locations: mockLocations, settings: this.settings }); }
   async getOverviewStats(locationId?: string): Promise<OverviewStats> {
     const values = this.reviews.filter((review) => !locationId || review.locationId === locationId); const answered = values.filter((review) => review.status === "approved" || review.status === "auto-sent").length;

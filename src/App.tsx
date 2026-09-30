@@ -15,6 +15,7 @@ import type {
   Theme,
 } from "./mockData";
 import { OverviewPage } from "./pages/OverviewPage";
+import { OnboardingPage } from "./pages/OnboardingPage";
 import { PostsPage } from "./pages/PostsPage";
 import { ReviewsPage } from "./pages/ReviewsPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -22,6 +23,7 @@ import {
   ReviewsManagerApiError,
   type CreatePostInput,
   type OverviewStats,
+  type OnboardingState,
   type ReviewsManagerService,
   type SessionUser,
 } from "./services/reviewsManager";
@@ -50,6 +52,7 @@ export default function App({ service }: AppProps) {
   const rawQuery = searchParams.get("q") ?? "";
 
   const [user, setUser] = useState<SessionUser | null>(null);
+  const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
   const [locations, setLocations] = useState<BusinessLocation[]>([]);
   const [reviews, setReviews] = useState<Review[]>([]);
   const [posts, setPosts] = useState<GooglePost[]>([]);
@@ -88,10 +91,11 @@ export default function App({ service }: AppProps) {
 
   useEffect(() => {
     let active = true;
-    Promise.all([service.getSession(), service.getLocations()])
-      .then(([session, data]) => {
+    Promise.all([service.getSession(), service.getOnboarding(), service.getLocations()])
+      .then(([session, onboardingState, data]) => {
         if (!active) return;
         setUser(session);
+        setOnboarding(onboardingState);
         setLocations(data.locations);
         setSettings(data.settings);
       })
@@ -348,6 +352,11 @@ export default function App({ service }: AppProps) {
     setUnauthenticated(false);
     setRetryKey((value) => value + 1);
   };
+  const finishOnboarding = () => {
+    routerNavigate(routerLocation.pathname === "/onboarding" && searchParams.get("manage") === "1" ? "/settings?location=all" : "/overview?location=all");
+    setLoading(true);
+    setRetryKey((value) => value + 1);
+  };
 
   if (unauthenticated) {
     return <Unauthenticated loginUrl={service.getLoginUrl()} googleAuth={service.getAuthMode() === "google"} onRetry={retryConnection} />;
@@ -359,6 +368,13 @@ export default function App({ service }: AppProps) {
   if (!user) {
     return <Unauthenticated loginUrl={service.getLoginUrl()} googleAuth={service.getAuthMode() === "google"} onRetry={retryConnection} />;
   }
+  if (onboarding && (onboarding.step !== "COMPLETE" || routerLocation.pathname === "/onboarding")) {
+    return <OnboardingPage user={user} state={onboarding} service={service} manage={searchParams.get("manage") === "1"} onStateChange={setOnboarding} onComplete={finishOnboarding} />;
+  }
+
+  const canReply = user.capabilities.includes("REPLY_TO_REVIEWS");
+  const canPublishPosts = user.capabilities.includes("PUBLISH_POSTS");
+  const canAutoReply = user.capabilities.includes("AUTO_REPLY");
 
   return <>
     <DashboardLayout
@@ -382,9 +398,9 @@ export default function App({ service }: AppProps) {
       <Routes>
         <Route path="/" element={<Navigate to={routeFor("overview")} replace />} />
         <Route path="/overview" element={<OverviewPage reviews={reviews} stats={stats} locations={locations} selectedLocation={selectedLocation} user={user} onNavigate={navigate} />} />
-        <Route path="/reviews" element={<ReviewsPage reviews={reviews} locations={locations} nextCursor={reviewCursor} loadingMore={loadingMore === "reviews"} onLoadMore={() => void loadMoreReviews()} onApprove={(id) => void approve(id)} onEdit={(review) => { editTriggerRef.current = document.activeElement as HTMLElement; setEditing(review); }} onDelete={(review) => void deleteReview(review)} busy={busy} />} />
-        <Route path="/posts" element={<PostsPage key={selectedLocation} posts={posts} locations={locations} selectedLocation={selectedLocation} nextCursor={postCursor} loadingMore={loadingMore === "posts"} onLoadMore={() => void loadMorePosts()} onCreate={createPost} onToggleStatus={togglePostStatus} onRetry={retryPost} />} />
-        <Route path="/settings" element={<SettingsPage selectedLocation={selectedLocation} locations={locations} settings={settings} connectUrl={service.getGoogleBusinessConnectUrl()} onSelectLocation={selectLocation} onUpdate={updateSettings} />} />
+        <Route path="/reviews" element={<ReviewsPage reviews={reviews} locations={locations} nextCursor={reviewCursor} loadingMore={loadingMore === "reviews"} onLoadMore={() => void loadMoreReviews()} onApprove={(id) => void approve(id)} onEdit={(review) => { editTriggerRef.current = document.activeElement as HTMLElement; setEditing(review); }} onDelete={(review) => void deleteReview(review)} busy={busy} canReply={canReply} />} />
+        <Route path="/posts" element={<PostsPage key={selectedLocation} posts={posts} locations={locations} selectedLocation={selectedLocation} nextCursor={postCursor} loadingMore={loadingMore === "posts"} onLoadMore={() => void loadMorePosts()} onCreate={createPost} onToggleStatus={togglePostStatus} onRetry={retryPost} canPublish={canPublishPosts} />} />
+        <Route path="/settings" element={<SettingsPage selectedLocation={selectedLocation} locations={locations} settings={settings} connectUrl={service.getGoogleBusinessConnectUrl()} connection={onboarding?.connection ?? null} readOnly={onboarding?.readOnly ?? true} canAutoReply={canAutoReply} onManageLocations={() => routerNavigate("/onboarding?manage=1")} onDisconnect={async () => { await service.disconnectGoogle(); retryConnection(); }} onSelectLocation={selectLocation} onUpdate={updateSettings} />} />
         <Route path="*" element={<Navigate to={routeFor("overview")} replace />} />
       </Routes>
     </DashboardLayout>
