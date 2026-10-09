@@ -1,9 +1,9 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, MemoryRouter, RouterProvider, useLocation } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import App from "../src/App";
-import { MockReviewsManagerService } from "../src/services/reviewsManager";
+import { HttpReviewsManagerService, MockReviewsManagerService } from "../src/services/reviewsManager";
 import type { Review } from "../src/mockData";
 
 function RouteProbe() {
@@ -21,6 +21,23 @@ function renderApp(initial = "/overview?location=all", service = new MockReviews
 }
 
 describe("dashboard routing and interactions", () => {
+  it("offers Google sign-in when a production session is unauthenticated", async () => {
+    vi.stubEnv("PROD", true);
+    vi.stubEnv("VITE_AUTH_MODE", "dev");
+    try {
+      const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => new Response(JSON.stringify({
+        error: { code: "UNAUTHENTICATED", message: "נדרשת התחברות" },
+      }), { status: 401 }));
+      const service = new HttpReviewsManagerService("", fetcher);
+      render(<MemoryRouter><App service={service} /></MemoryRouter>);
+      expect(await screen.findByRole("link", { name: "התחברות עם Google" })).toHaveAttribute("href", "/auth/google/start");
+      expect(screen.getByRole("heading", { name: "ברוכים הבאים ל־Revu" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "ניסיון חיבור מחדש" })).not.toBeInTheDocument();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("renders in Hebrew RTL, redirects unknown routes, and exposes route links", async () => {
     const { container } = renderApp("/missing");
     expect(await screen.findByText("בוקר טוב, מיכל 👋")).toBeInTheDocument();

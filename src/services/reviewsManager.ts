@@ -78,7 +78,7 @@ export class HttpReviewsManagerService implements ReviewsManagerService {
   private readonly authMode: "dev" | "google";
   private csrfToken = "";
 
-  constructor(baseUrl = import.meta.env.VITE_API_BASE_URL ?? "", private readonly fetcher: typeof fetch = fetch, authMode: "dev" | "google" = import.meta.env.VITE_AUTH_MODE === "google" ? "google" : "dev") { this.baseUrl = baseUrl.replace(/\/$/, ""); this.authMode = authMode; }
+  constructor(baseUrl = import.meta.env.VITE_API_BASE_URL ?? "", private readonly fetcher: typeof fetch = fetch, authMode: "dev" | "google" = import.meta.env.PROD || import.meta.env.VITE_AUTH_MODE === "google" ? "google" : "dev") { this.baseUrl = baseUrl.replace(/\/$/, ""); this.authMode = authMode; }
   getLoginUrl() { return `${this.baseUrl}/auth/google/start`; }
   getGoogleBusinessConnectUrl() { return `${this.baseUrl}/api/v1/google-business/connect`; }
   getAuthMode() { return this.authMode; }
