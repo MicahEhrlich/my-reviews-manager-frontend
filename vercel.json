@@ -1,0 +1,12 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "api-production-c456.up.railway.app/api/:path*"
+    },
+    {
+      "source": "/auth/:path*",
+      "destination": "api-production-c456.up.railway.app/auth/:path*"
+    }
+  ]
+}
