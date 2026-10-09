@@ -2,11 +2,11 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "revu-api-production.up.railway.app/api/:path*"
+      "destination": "https://revu-api-production.up.railway.app/api/:path*"
     },
     {
       "source": "/auth/:path*",
-      "destination": "revu-api-production.up.railway.app/auth/:path*"
+      "destination": "https://revu-api-production.up.railway.app/auth/:path*"
     }
   ]
 }
